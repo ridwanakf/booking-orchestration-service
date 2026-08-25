@@ -22,13 +22,15 @@ func NewTemporal(c client.Client, taskQueue string, params constant.WorkflowPara
 	return &Temporal{client: c, taskQueue: taskQueue, params: params}
 }
 
-// The workflow id is the booking id, which is what makes duplicate starts
-// harmless: every path that can start a booking converges on one execution.
-// An already-started error is therefore success, not failure.
+// The workflow id is the booking id, so every path that can start a booking
+// converges on one execution and a duplicate start is success, not failure.
 func (t *Temporal) StartBooking(ctx context.Context, bookingID uuid.UUID) (bool, error) {
 	_, err := t.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        bookingID.String(),
 		TaskQueue: t.taskQueue,
+		// Without this the SDK reports an already-running execution as a fresh
+		// start, and the sweep cannot tell recovery from a wedged booking.
+		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}, constant.WorkflowBooking, bookingID.String(), t.params)
 
 	if _, ok := errors.AsType[*serviceerror.WorkflowExecutionAlreadyStarted](err); ok {

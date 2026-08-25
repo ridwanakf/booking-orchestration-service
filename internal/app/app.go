@@ -12,6 +12,7 @@ import (
 
 	"github.com/ridwanakf/booking-orchestration-service/config"
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 	"github.com/ridwanakf/booking-orchestration-service/internal/observability"
 	"github.com/ridwanakf/booking-orchestration-service/internal/orchestrator"
 	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
@@ -21,8 +22,6 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/supplier"
 	"github.com/ridwanakf/booking-orchestration-service/internal/sweep"
 	"github.com/ridwanakf/booking-orchestration-service/internal/workflow"
-
-	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 type App struct {

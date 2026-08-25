@@ -10,9 +10,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
-	"github.com/ridwanakf/booking-orchestration-service/internal/service"
-
 	"github.com/ridwanakf/booking-orchestration-service/internal/model"
+	"github.com/ridwanakf/booking-orchestration-service/internal/service"
 )
 
 type Callback struct {

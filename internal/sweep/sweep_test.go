@@ -127,9 +127,7 @@ func (s *SweepSuite) TestOneFailedStartDoesNotStopTheBatch() {
 	s.Contains(s.startedIDs(), healthy, "a failed start must not abandon the rest of the batch")
 }
 
-// A batch whose context is done is abandoned rather than driven to completion.
-// The rows are still stale, so the next pass takes them; pushing on would log
-// one deadline per remaining row and bury the reason the pass ran out of time.
+// The rows are still stale, so the next pass takes them.
 func (s *SweepSuite) TestADoneContextAbandonsTheRestOfTheBatch() {
 	first, second, third := uuid.New(), uuid.New(), uuid.New()
 	ctx, cancel := context.WithCancel(context.Background())

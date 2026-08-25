@@ -46,9 +46,6 @@ type Answer struct {
 	LatencyMS int64
 }
 
-// Holds no configuration: every bound an activity applies arrives as workflow
-// input, so a worker restarted with new settings cannot disagree with a run
-// already in flight.
 type Activities struct {
 	repo     repository.BookingRepository
 	supplier supplier.Client
@@ -388,8 +385,6 @@ func (a *Activities) superseded(ctx context.Context, id uuid.UUID, answer Answer
 	return AttemptResult{Outcome: OutcomeSettled, Attempt: answer.Attempt, Reason: "superseded"}, nil
 }
 
-// readBeforeAuthorizing retries a read that has authorized nothing yet, so a
-// transient database blip does not fail a run that has touched no supplier.
 func (a *Activities) readBeforeAuthorizing(ctx context.Context, id uuid.UUID) (*model.Booking, error) {
 	var err error
 	for attempt := range preAuthorizeReads {

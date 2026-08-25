@@ -59,7 +59,7 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval: time.Second,
 			MaximumInterval: 30 * time.Second,
-			MaximumAttempts: 0,
+			MaximumAttempts: 5,
 		},
 	})
 	sending := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -92,11 +92,6 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 		switch result.Outcome {
 		case OutcomeConfirmed, OutcomeRejected, OutcomeSettled, OutcomeFailed:
 			return nil
-		default:
-			// Closed set, so this is a bug rather than a state. Continuing would
-			// send another create on a value nothing defined.
-			log.Error("unrecognised attempt outcome, exiting rather than retrying", "outcome", result.Outcome)
-			return nil
 		case OutcomeInDoubt, OutcomeBudgetSpent:
 			return park(ctx, cfg, bookingID)
 		case OutcomeExit:
@@ -107,6 +102,11 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 					return err
 				}
 			}
+		default:
+			// Closed set, so this is a bug rather than a state. Continuing would
+			// send another create on a value nothing defined.
+			log.Error("unrecognised attempt outcome, exiting rather than retrying", "outcome", result.Outcome)
+			return nil
 		}
 	}
 

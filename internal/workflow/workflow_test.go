@@ -150,8 +150,6 @@ func (s *WorkflowSuite) TestAParkedBookingIsResolvedByALateCallback() {
 
 // Nothing resolves it, so the bounded timer ends the run rather than leaking an
 // execution forever.
-// Nothing resolves it, so the bounded timer ends the run rather than leaking an
-// execution forever.
 func (s *WorkflowSuite) TestAParkedBookingGivesUpOnItsTimer() {
 	s.onLoad("RECEIVED")
 	s.onAttempt(workflow.OutcomeAmbiguous, 2)
@@ -162,8 +160,6 @@ func (s *WorkflowSuite) TestAParkedBookingGivesUpOnItsTimer() {
 	s.GreaterOrEqual(elapsed, s.params.ParkTimeout, "the run must hold its full recovery window")
 }
 
-// Park reported that nothing needs waiting for, either because the booking
-// settled or because it was unreachable and is now FAILED.
 // Park reported nothing to wait for, either because the booking settled or
 // because it was called unreachable. Holding a 24h timer on a finished booking
 // would leak an execution per failure.
@@ -177,8 +173,6 @@ func (s *WorkflowSuite) TestNoWaitWhenParkHasNothingToHoldOpen() {
 	s.Less(elapsed, s.params.ParkTimeout, "no window should be armed")
 }
 
-// The schedule comes from workflow input, not process configuration, so a
-// replay reproduces the history it recorded even if the deployment changed.
 // The schedule comes from workflow input, not process configuration, so a
 // replay reproduces the history it recorded even if the deployment changed.
 func (s *WorkflowSuite) TestTheRetryDelayComesFromInput() {
