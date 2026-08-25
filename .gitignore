@@ -9,10 +9,6 @@
 .env
 .env.local
 
-# Working context, not part of the project
-.claude/
-CLAUDE.md
-
 # Editor and OS
 .DS_Store
 .idea/

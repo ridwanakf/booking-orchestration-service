@@ -17,6 +17,11 @@ const docTemplate = `{
     "paths": {
         "/bookings": {
             "post": {
+                "security": [
+                    {
+                        "DistributorKey": []
+                    }
+                ],
                 "description": "Idempotent per (distributorId, idempotencyKey). Replaying the same payload returns the original booking with 200 and the Idempotent-Replayed header; the same key with a different payload is refused.",
                 "consumes": [
                     "application/json"
@@ -58,6 +63,12 @@ const docTemplate = `{
                             "$ref": "#/definitions/handler.ErrorResponse"
                         }
                     },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
                     "422": {
                         "description": "Unprocessable Entity",
                         "schema": {
@@ -75,6 +86,11 @@ const docTemplate = `{
         },
         "/bookings/{bookingId}": {
             "get": {
+                "security": [
+                    {
+                        "DistributorKey": []
+                    }
+                ],
                 "produces": [
                     "application/json"
                 ],
@@ -100,6 +116,12 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "$ref": "#/definitions/handler.ErrorResponse"
                         }
@@ -166,6 +188,11 @@ const docTemplate = `{
         },
         "/supplier/callbacks": {
             "post": {
+                "security": [
+                    {
+                        "SupplierCallbackToken": []
+                    }
+                ],
                 "description": "Authenticated by a shared token. Checks run in order: token, then booking, then status vocabulary, then state. A redelivered callback is a no-op; one contradicting a settled outcome is refused and flagged for recovery.",
                 "consumes": [
                     "application/json"
@@ -178,13 +205,6 @@ const docTemplate = `{
                 ],
                 "summary": "Receive a supplier callback",
                 "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Shared secret",
-                        "name": "X-Callback-Token",
-                        "in": "header",
-                        "required": true
-                    },
                     {
                         "description": "Supplier outcome",
                         "name": "request",
@@ -349,11 +369,6 @@ const docTemplate = `{
                     "type": "string",
                     "example": "2026-09-12"
                 },
-                "distributorId": {
-                    "type": "string",
-                    "maxLength": 64,
-                    "example": "distributor-001"
-                },
                 "guest": {
                     "$ref": "#/definitions/handler.Guest"
                 },
@@ -412,6 +427,19 @@ const docTemplate = `{
                     "example": "Yamada"
                 }
             }
+        }
+    },
+    "securityDefinitions": {
+        "DistributorKey": {
+            "description": "Per-distributor API key, sent as \"Bearer bok_\u003ckeyId\u003e_\u003csecret\u003e\". The credential decides the tenant; booking reads are scoped to it.",
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        },
+        "SupplierCallbackToken": {
+            "type": "apiKey",
+            "name": "X-Callback-Token",
+            "in": "header"
         }
     }
 }`

@@ -42,13 +42,13 @@ func NewCallback(svc service.BookingService, token string) *Callback {
 // @Tags			callbacks
 // @Accept			json
 // @Produce		json
-// @Param			X-Callback-Token	header		string			true	"Shared secret"
 // @Param			request				body		CallbackRequest	true	"Supplier outcome"
 // @Success		200					{object}	CallbackResponse
 // @Failure		400					{object}	ErrorResponse
 // @Failure		401					{object}	ErrorResponse
 // @Failure		404					{object}	ErrorResponse
 // @Failure		409					{object}	ErrorResponse
+// @Security		SupplierCallbackToken
 // @Router			/supplier/callbacks [post]
 func (h *Callback) Receive(c *gin.Context) {
 	// Before any state is read, so an unauthenticated caller cannot probe which

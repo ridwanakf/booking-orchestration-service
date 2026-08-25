@@ -79,10 +79,6 @@ definitions:
       checkOut:
         example: "2026-09-12"
         type: string
-      distributorId:
-        example: distributor-001
-        maxLength: 64
-        type: string
       guest:
         $ref: '#/definitions/handler.Guest'
       idempotencyKey:
@@ -170,6 +166,10 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
         "422":
           description: Unprocessable Entity
           schema:
@@ -178,6 +178,8 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - DistributorKey: []
       summary: Create a booking
       tags:
       - bookings
@@ -200,10 +202,16 @@ paths:
           description: Bad Request
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
         "404":
           description: Not Found
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - DistributorKey: []
       summary: Read a booking
       tags:
       - bookings
@@ -249,11 +257,6 @@ paths:
         booking, then status vocabulary, then state. A redelivered callback is a no-op;
         one contradicting a settled outcome is refused and flagged for recovery.'
       parameters:
-      - description: Shared secret
-        in: header
-        name: X-Callback-Token
-        required: true
-        type: string
       - description: Supplier outcome
         in: body
         name: request
@@ -283,7 +286,20 @@ paths:
           description: Conflict
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - SupplierCallbackToken: []
       summary: Receive a supplier callback
       tags:
       - callbacks
+securityDefinitions:
+  DistributorKey:
+    description: Per-distributor API key, sent as "Bearer bok_<keyId>_<secret>". The
+      credential decides the tenant; booking reads are scoped to it.
+    in: header
+    name: Authorization
+    type: apiKey
+  SupplierCallbackToken:
+    in: header
+    name: X-Callback-Token
+    type: apiKey
 swagger: "2.0"

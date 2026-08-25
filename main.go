@@ -6,6 +6,15 @@
 //	@description	Orchestrates hotel bookings between travel distributors and unreliable suppliers.
 //	@description	A supplier timeout is an unknown outcome, never a rejection.
 //	@BasePath		/
+//
+//	@securityDefinitions.apikey	DistributorKey
+//	@in							header
+//	@name						Authorization
+//	@description				Per-distributor API key, sent as "Bearer bok_<keyId>_<secret>". The credential decides the tenant; booking reads are scoped to it.
+//
+//	@securityDefinitions.apikey	SupplierCallbackToken
+//	@in							header
+//	@name						X-Callback-Token
 package main
 
 import (

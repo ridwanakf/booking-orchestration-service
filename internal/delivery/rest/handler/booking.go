@@ -25,10 +25,12 @@ func NewBooking(svc service.BookingService) *Booking { return &Booking{svc: svc}
 // @Tags			bookings
 // @Accept			json
 // @Produce		json
+// @Security		DistributorKey
 // @Param			request	body		CreateBookingRequest	true	"Booking to create"
 // @Success		201		{object}	BookingResponse
 // @Success		200		{object}	BookingResponse	"Idempotent replay of an existing booking"
 // @Failure		400		{object}	ErrorResponse
+// @Failure		401		{object}	ErrorResponse
 // @Failure		422		{object}	ErrorResponse
 // @Failure		500		{object}	ErrorResponse
 // @Router			/bookings [post]
@@ -69,9 +71,11 @@ func (h *Booking) Create(c *gin.Context) {
 // @Summary	Read a booking
 // @Tags		bookings
 // @Produce	json
+// @Security	DistributorKey
 // @Param		bookingId	path		string	true	"Booking id"
 // @Success	200			{object}	BookingResponse
 // @Failure	400			{object}	ErrorResponse
+// @Failure	401			{object}	ErrorResponse
 // @Failure	404			{object}	ErrorResponse
 // @Router		/bookings/{bookingId} [get]
 func (h *Booking) Get(c *gin.Context) {
@@ -108,7 +112,6 @@ func parseCreateRequest(req CreateBookingRequest) (model.CreateRequest, error) {
 	}
 
 	return model.CreateRequest{
-		DistributorID:  req.DistributorID,
 		IdempotencyKey: req.IdempotencyKey,
 		PropertyID:     req.PropertyID,
 		RoomTypeID:     req.RoomTypeID,

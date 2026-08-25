@@ -1,7 +1,10 @@
-.git
-.claude
-.idea
-CLAUDE.md
-README.md
-booking-orchestration-service
-booking-orchestrator
+# Deny by default: the image build gets the source it needs and nothing else.
+*
+!cmd/
+!config/
+!docs/
+!internal/
+!migrations/
+!go.mod
+!go.sum
+!main.go
