@@ -15,7 +15,7 @@ import (
 func ptr(v string) *string { return &v }
 
 func (s *ServiceSuite) stored(status model.Status, reference *string) *model.Booking {
-	return &model.Booking{ID: s.id, Status: status, SupplierReference: reference}
+	return &model.Booking{ID: s.id, DistributorID: "distributor-001", Status: status, SupplierReference: reference}
 }
 
 func (s *ServiceSuite) confirm() service.SupplierOutcome {

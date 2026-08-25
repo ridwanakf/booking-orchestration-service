@@ -46,6 +46,10 @@ func New(repo repository.BookingRepository, orch orchestrator.Orchestrator, supp
 // Create is idempotent per (distributor, key). The bool reports whether this
 // call created the booking; false means the caller is seeing a replay.
 func (s *Service) Create(ctx context.Context, req model.CreateRequest) (*model.Booking, bool, error) {
+	// The credential decides the tenant. A body value is accepted and ignored,
+	// because rejecting it would leak which tenant owns a key.
+	req.DistributorID = observability.Distributor(ctx)
+
 	fingerprint := req.Fingerprint()
 
 	id, err := uuid.NewV7()
@@ -88,8 +92,14 @@ func (s *Service) Create(ctx context.Context, req model.CreateRequest) (*model.B
 	return stored, true, nil
 }
 
+// Get is scoped to the authenticated distributor. Another tenant's booking
+// answers not-found rather than forbidden, so the endpoint cannot be used to
+// discover which ids exist.
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (*model.Booking, error) {
 	b, err := s.repo.GetByID(ctx, id)
+	if err == nil && b.DistributorID != observability.Distributor(ctx) {
+		return nil, constant.ErrBookingNotFound
+	}
 	if err != nil {
 		if errors.Is(err, constant.ErrBookingNotFound) {
 			return nil, err

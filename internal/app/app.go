@@ -12,6 +12,8 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
 	"github.com/ridwanakf/booking-orchestration-service/internal/observability"
 	"github.com/ridwanakf/booking-orchestration-service/internal/orchestrator"
+	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
+	apikeyrepo "github.com/ridwanakf/booking-orchestration-service/internal/repository/apikey"
 	bookingrepo "github.com/ridwanakf/booking-orchestration-service/internal/repository/booking"
 	bookingsvc "github.com/ridwanakf/booking-orchestration-service/internal/service/booking"
 )
@@ -22,6 +24,7 @@ type App struct {
 	temporal client.Client
 
 	Booking *bookingsvc.Service
+	APIKeys repository.APIKeyRepository
 }
 
 func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
@@ -53,6 +56,7 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 		pg:       pg,
 		temporal: temporal,
 		Booking:  bookingsvc.New(repo, orch, cfg.SupplierID, slog.Default()),
+		APIKeys:  apikeyrepo.New(pg),
 	}, nil
 }
 

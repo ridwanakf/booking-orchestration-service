@@ -35,3 +35,10 @@ type Booking struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// APIKey is a distributor credential. The secret is never stored, only its hash.
+type APIKey struct {
+	KeyID         string
+	DistributorID string
+	SecretHash    string
+}

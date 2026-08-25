@@ -13,7 +13,7 @@ type Guest struct {
 
 type CreateBookingRequest struct {
 	IdempotencyKey string `json:"idempotencyKey" binding:"required,max=128" example:"partner-12345"`
-	DistributorID  string `json:"distributorId" binding:"required,max=64" example:"distributor-001"`
+	DistributorID  string `json:"distributorId" binding:"omitempty,max=64" example:"distributor-001"`
 	PropertyID     string `json:"propertyId" binding:"required,max=64" example:"hotel-001"`
 	RoomTypeID     string `json:"roomTypeId" binding:"required,max=64" example:"room-deluxe-confirm"`
 	CheckIn        string `json:"checkIn" binding:"required" example:"2026-09-10"`

@@ -23,3 +23,16 @@ func RequestIDPtr(ctx context.Context) *string {
 	}
 	return nil
 }
+
+const distributorKey ctxKey = iota + 1
+
+// WithDistributor carries the authenticated tenant, which is the only source of
+// distributor identity once a request is past the middleware.
+func WithDistributor(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, distributorKey, id)
+}
+
+func Distributor(ctx context.Context) string {
+	id, _ := ctx.Value(distributorKey).(string)
+	return id
+}

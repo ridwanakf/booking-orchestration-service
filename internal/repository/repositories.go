@@ -51,6 +51,10 @@ type StaleThresholds struct {
 	InFlight time.Duration
 }
 
+type APIKeyRepository interface {
+	FindActive(ctx context.Context, keyID string) (*model.APIKey, error)
+}
+
 // The guarded writes belong to this contract rather than sitting above it: the
 // guarantee that a lost race is a named outcome is the contract.
 type BookingRepository interface {

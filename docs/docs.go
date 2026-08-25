@@ -228,7 +228,6 @@ const docTemplate = `{
             "required": [
                 "checkIn",
                 "checkOut",
-                "distributorId",
                 "guest",
                 "idempotencyKey",
                 "propertyId",

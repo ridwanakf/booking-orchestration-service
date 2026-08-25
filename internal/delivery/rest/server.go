@@ -8,9 +8,10 @@ import (
 	_ "github.com/ridwanakf/booking-orchestration-service/docs"
 	"github.com/ridwanakf/booking-orchestration-service/internal/delivery/rest/handler"
 	"github.com/ridwanakf/booking-orchestration-service/internal/delivery/rest/middleware"
+	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
 )
 
-func NewEngine(health *handler.Health, booking *handler.Booking, swaggerEnabled bool) *gin.Engine {
+func NewEngine(health *handler.Health, booking *handler.Booking, keys repository.APIKeyRepository, swaggerEnabled bool) *gin.Engine {
 	engine := gin.New()
 
 	// RequestContext runs first so the recovery handler's log line carries the
@@ -21,8 +22,11 @@ func NewEngine(health *handler.Health, booking *handler.Booking, swaggerEnabled 
 	engine.GET("/healthz", health.Live)
 	engine.GET("/readyz", health.Ready)
 
-	engine.POST("/bookings", booking.Create)
-	engine.GET("/bookings/:bookingId", booking.Get)
+	// Health and docs are unauthenticated on purpose; everything a distributor
+	// can reach is behind a credential.
+	distributor := engine.Group("", middleware.Authenticate(keys))
+	distributor.POST("/bookings", booking.Create)
+	distributor.GET("/bookings/:bookingId", booking.Get)
 
 	// The UI exposes the whole API surface, so it defaults off and is opted into.
 	if swaggerEnabled {

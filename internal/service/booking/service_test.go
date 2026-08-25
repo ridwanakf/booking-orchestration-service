@@ -14,6 +14,7 @@ import (
 
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
 	"github.com/ridwanakf/booking-orchestration-service/internal/model"
+	"github.com/ridwanakf/booking-orchestration-service/internal/observability"
 	orchmocks "github.com/ridwanakf/booking-orchestration-service/internal/orchestrator/mocks"
 	repomocks "github.com/ridwanakf/booking-orchestration-service/internal/repository/mocks"
 	booking "github.com/ridwanakf/booking-orchestration-service/internal/service/booking"
@@ -39,7 +40,7 @@ func (s *ServiceSuite) SetupTest() {
 	s.repo = repomocks.NewMockBookingRepository(s.ctrl)
 	s.orch = orchmocks.NewMockOrchestrator(s.ctrl)
 	s.svc = booking.New(s.repo, s.orch, "mock-supplier", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	s.ctx = context.Background()
+	s.ctx = observability.WithDistributor(context.Background(), "distributor-001")
 	s.id = uuid.New()
 	s.req = model.CreateRequest{
 		DistributorID:  "distributor-001",
@@ -155,13 +156,24 @@ func (s *ServiceSuite) TestCreateIsUnaffectedByADuplicateSuspectLookupFailure() 
 }
 
 func (s *ServiceSuite) TestGet() {
-	want := &model.Booking{ID: uuid.New(), Status: model.StatusPending}
+	want := &model.Booking{ID: uuid.New(), DistributorID: "distributor-001", Status: model.StatusPending}
 	s.repo.EXPECT().GetByID(gomock.Any(), want.ID).Return(want, nil)
 
 	got, err := s.svc.Get(s.ctx, want.ID)
 
 	s.Require().NoError(err)
 	s.Equal(want, got)
+}
+
+// Another tenant's booking is indistinguishable from a missing one, so the
+// endpoint cannot be used to discover which ids exist.
+func (s *ServiceSuite) TestGetRefusesAnotherDistributorsBooking() {
+	other := &model.Booking{ID: uuid.New(), DistributorID: "distributor-999", Status: model.StatusConfirmed}
+	s.repo.EXPECT().GetByID(gomock.Any(), other.ID).Return(other, nil)
+
+	_, err := s.svc.Get(s.ctx, other.ID)
+
+	s.ErrorIs(err, constant.ErrBookingNotFound, "not forbidden: that would confirm the id exists")
 }
 
 func (s *ServiceSuite) TestGetNotFound() {

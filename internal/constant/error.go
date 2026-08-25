@@ -9,6 +9,7 @@ var (
 	ErrTransitionConflict        = errors.New("transition lost a race")
 	ErrUnsupportedSupplierStatus = errors.New("unsupported supplier status")
 	ErrInvalidCallbackToken      = errors.New("invalid callback token")
+	ErrUnauthorized              = errors.New("unauthorized")
 	ErrCallbackConflict          = errors.New("callback conflicts with the booking state")
 )
 
