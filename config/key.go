@@ -15,6 +15,7 @@ const (
 	keyCallbackBaseURL = "CALLBACK_BASE_URL"
 
 	keyCreateAttempts    = "CREATE_ATTEMPTS"
+	keyCreateRetryDelay  = "CREATE_RETRY_DELAY"
 	keyParkTimeout       = "PARK_TIMEOUT"
 	keyMockTimeoutHold   = "MOCK_TIMEOUT_HOLD"
 	keyMockCallbackDelay = "MOCK_CALLBACK_DELAY"

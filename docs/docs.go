@@ -15,6 +15,104 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/bookings": {
+            "post": {
+                "description": "Idempotent per (distributorId, idempotencyKey). Replaying the same payload returns the original booking with 200 and the Idempotent-Replayed header; the same key with a different payload is refused.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "bookings"
+                ],
+                "summary": "Create a booking",
+                "parameters": [
+                    {
+                        "description": "Booking to create",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.CreateBookingRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Idempotent replay of an existing booking",
+                        "schema": {
+                            "$ref": "#/definitions/handler.BookingResponse"
+                        }
+                    },
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/handler.BookingResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/bookings/{bookingId}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "bookings"
+                ],
+                "summary": "Read a booking",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Booking id",
+                        "name": "bookingId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handler.BookingResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/healthz": {
             "get": {
                 "produces": [
@@ -68,6 +166,108 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "handler.BookingResponse": {
+            "type": "object",
+            "properties": {
+                "bookingId": {
+                    "type": "string",
+                    "example": "0198f2c4-6d1a-7c3e-9f4b-2f6f0a1d9b10"
+                },
+                "checkIn": {
+                    "type": "string",
+                    "example": "2026-09-10"
+                },
+                "checkOut": {
+                    "type": "string",
+                    "example": "2026-09-12"
+                },
+                "createdAt": {
+                    "type": "string",
+                    "example": "2026-08-24T10:00:00Z"
+                },
+                "distributorId": {
+                    "type": "string",
+                    "example": "distributor-001"
+                },
+                "failureReason": {
+                    "type": "string"
+                },
+                "guest": {
+                    "$ref": "#/definitions/handler.Guest"
+                },
+                "idempotencyKey": {
+                    "type": "string",
+                    "example": "partner-12345"
+                },
+                "needsRecovery": {
+                    "type": "boolean"
+                },
+                "propertyId": {
+                    "type": "string",
+                    "example": "hotel-001"
+                },
+                "roomTypeId": {
+                    "type": "string",
+                    "example": "room-deluxe-confirm"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "RECEIVED"
+                },
+                "supplierReference": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string",
+                    "example": "2026-08-24T10:00:00Z"
+                }
+            }
+        },
+        "handler.CreateBookingRequest": {
+            "type": "object",
+            "required": [
+                "checkIn",
+                "checkOut",
+                "distributorId",
+                "guest",
+                "idempotencyKey",
+                "propertyId",
+                "roomTypeId"
+            ],
+            "properties": {
+                "checkIn": {
+                    "type": "string",
+                    "example": "2026-09-10"
+                },
+                "checkOut": {
+                    "type": "string",
+                    "example": "2026-09-12"
+                },
+                "distributorId": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "example": "distributor-001"
+                },
+                "guest": {
+                    "$ref": "#/definitions/handler.Guest"
+                },
+                "idempotencyKey": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "example": "partner-12345"
+                },
+                "propertyId": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "example": "hotel-001"
+                },
+                "roomTypeId": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "example": "room-deluxe-confirm"
+                }
+            }
+        },
         "handler.ErrorResponse": {
             "type": "object",
             "properties": {
@@ -85,6 +285,25 @@ const docTemplate = `{
                 "status": {
                     "type": "string",
                     "example": "error"
+                }
+            }
+        },
+        "handler.Guest": {
+            "type": "object",
+            "required": [
+                "firstName",
+                "lastName"
+            ],
+            "properties": {
+                "firstName": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "example": "Taro"
+                },
+                "lastName": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "example": "Yamada"
                 }
             }
         }

@@ -1,5 +1,81 @@
 basePath: /
 definitions:
+  handler.BookingResponse:
+    properties:
+      bookingId:
+        example: 0198f2c4-6d1a-7c3e-9f4b-2f6f0a1d9b10
+        type: string
+      checkIn:
+        example: "2026-09-10"
+        type: string
+      checkOut:
+        example: "2026-09-12"
+        type: string
+      createdAt:
+        example: "2026-08-24T10:00:00Z"
+        type: string
+      distributorId:
+        example: distributor-001
+        type: string
+      failureReason:
+        type: string
+      guest:
+        $ref: '#/definitions/handler.Guest'
+      idempotencyKey:
+        example: partner-12345
+        type: string
+      needsRecovery:
+        type: boolean
+      propertyId:
+        example: hotel-001
+        type: string
+      roomTypeId:
+        example: room-deluxe-confirm
+        type: string
+      status:
+        example: RECEIVED
+        type: string
+      supplierReference:
+        type: string
+      updatedAt:
+        example: "2026-08-24T10:00:00Z"
+        type: string
+    type: object
+  handler.CreateBookingRequest:
+    properties:
+      checkIn:
+        example: "2026-09-10"
+        type: string
+      checkOut:
+        example: "2026-09-12"
+        type: string
+      distributorId:
+        example: distributor-001
+        maxLength: 64
+        type: string
+      guest:
+        $ref: '#/definitions/handler.Guest'
+      idempotencyKey:
+        example: partner-12345
+        maxLength: 128
+        type: string
+      propertyId:
+        example: hotel-001
+        maxLength: 64
+        type: string
+      roomTypeId:
+        example: room-deluxe-confirm
+        maxLength: 64
+        type: string
+    required:
+    - checkIn
+    - checkOut
+    - distributorId
+    - guest
+    - idempotencyKey
+    - propertyId
+    - roomTypeId
+    type: object
   handler.ErrorResponse:
     properties:
       code:
@@ -14,6 +90,20 @@ definitions:
         example: error
         type: string
     type: object
+  handler.Guest:
+    properties:
+      firstName:
+        example: Taro
+        maxLength: 64
+        type: string
+      lastName:
+        example: Yamada
+        maxLength: 64
+        type: string
+    required:
+    - firstName
+    - lastName
+    type: object
 info:
   contact: {}
   description: |-
@@ -22,6 +112,72 @@ info:
   title: Booking Orchestration API
   version: "1.0"
 paths:
+  /bookings:
+    post:
+      consumes:
+      - application/json
+      description: Idempotent per (distributorId, idempotencyKey). Replaying the same
+        payload returns the original booking with 200 and the Idempotent-Replayed
+        header; the same key with a different payload is refused.
+      parameters:
+      - description: Booking to create
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/handler.CreateBookingRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Idempotent replay of an existing booking
+          schema:
+            $ref: '#/definitions/handler.BookingResponse'
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.BookingResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Create a booking
+      tags:
+      - bookings
+  /bookings/{bookingId}:
+    get:
+      parameters:
+      - description: Booking id
+        in: path
+        name: bookingId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.BookingResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Read a booking
+      tags:
+      - bookings
   /healthz:
     get:
       produces:

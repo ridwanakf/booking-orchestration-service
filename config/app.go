@@ -18,7 +18,7 @@ type AppConfig struct {
 
 	CreateAttempts       int
 	ParkTimeout          time.Duration
-	RetrieveDelays       []time.Duration
+	CreateRetryDelay     time.Duration
 	ActivityStartToClose time.Duration
 	MockTimeoutHold      time.Duration
 	MockCallbackDelay    time.Duration

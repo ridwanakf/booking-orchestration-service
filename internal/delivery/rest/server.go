@@ -10,7 +10,7 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/delivery/rest/middleware"
 )
 
-func NewEngine(health *handler.Health, swaggerEnabled bool) *gin.Engine {
+func NewEngine(health *handler.Health, booking *handler.Booking, swaggerEnabled bool) *gin.Engine {
 	engine := gin.New()
 
 	// RequestContext runs first so the recovery handler's log line carries the
@@ -20,6 +20,9 @@ func NewEngine(health *handler.Health, swaggerEnabled bool) *gin.Engine {
 
 	engine.GET("/healthz", health.Live)
 	engine.GET("/readyz", health.Ready)
+
+	engine.POST("/bookings", booking.Create)
+	engine.GET("/bookings/:bookingId", booking.Get)
 
 	// The UI exposes the whole API surface, so it defaults off and is opted into.
 	if swaggerEnabled {

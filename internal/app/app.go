@@ -4,19 +4,24 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
 	"github.com/ridwanakf/booking-orchestration-service/config"
+	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
 	"github.com/ridwanakf/booking-orchestration-service/internal/observability"
+	"github.com/ridwanakf/booking-orchestration-service/internal/orchestrator"
+	bookingrepo "github.com/ridwanakf/booking-orchestration-service/internal/repository/booking"
+	bookingsvc "github.com/ridwanakf/booking-orchestration-service/internal/service/booking"
 )
 
 type App struct {
 	cfg      config.AppConfig
 	pg       *pgxpool.Pool
 	temporal client.Client
+
+	Booking *bookingsvc.Service
 }
 
 func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
@@ -35,7 +40,20 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 		return nil, fmt.Errorf("build temporal client: %w", err)
 	}
 
-	return &App{cfg: cfg, pg: pg, temporal: temporal}, nil
+	repo := bookingrepo.New(pg)
+	orch := orchestrator.NewTemporal(temporal, cfg.TaskQueue, constant.WorkflowParams{
+		CreateAttempts:     cfg.CreateAttempts,
+		RetrieveDelaysSec:  []int{int(cfg.CreateRetryDelay.Seconds())},
+		ParkTimeoutSec:     int(cfg.ParkTimeout.Seconds()),
+		ActivityTimeoutSec: int(cfg.ActivityStartToClose.Seconds()),
+	})
+
+	return &App{
+		cfg:      cfg,
+		pg:       pg,
+		temporal: temporal,
+		Booking:  bookingsvc.New(repo, orch, cfg.SupplierID, slog.Default()),
+	}, nil
 }
 
 // Ready gates traffic, so it measures only what the request path needs. The
@@ -66,5 +84,3 @@ func (a *App) Close() {
 		a.pg.Close()
 	}
 }
-
-var _ = time.Second

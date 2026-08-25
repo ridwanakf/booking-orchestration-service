@@ -44,7 +44,7 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 	}
 	defer application.Close()
 
-	engine := rest.NewEngine(handler.NewHealth(application.Ready), cfg.SwaggerEnabled)
+	engine := rest.NewEngine(handler.NewHealth(application.Ready), handler.NewBooking(application.Booking), cfg.SwaggerEnabled)
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

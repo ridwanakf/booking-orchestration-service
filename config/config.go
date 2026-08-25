@@ -42,9 +42,7 @@ func Load() (AppConfig, error) {
 			CreateAttempts: l.integer(keyCreateAttempts, 2),
 			ParkTimeout:    l.dur(keyParkTimeout, 24*time.Hour),
 
-			// Retrieve rather than re-create: a book endpoint is metered, so
-			// ambiguity waits and asks rather than sending another create.
-			RetrieveDelays:    []time.Duration{30 * time.Second, 60 * time.Second, 120 * time.Second, 300 * time.Second},
+			CreateRetryDelay:  l.dur(keyCreateRetryDelay, 30*time.Second),
 			MockTimeoutHold:   l.dur(keyMockTimeoutHold, 5*time.Second),
 			MockCallbackDelay: l.dur(keyMockCallbackDelay, 3*time.Second),
 
