@@ -49,19 +49,26 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 	cfg := fromParams(params)
 	log := workflow.GetLogger(ctx)
 
-	// Persisting and reading are safe to retry; calling the supplier is not.
-	// A retried call is a second create that no attempt counter ever saw.
-	// Bounded by a window rather than a count: a failing persist holds an answer
-	// the supplier already gave, and giving up loses a confirmation that exists.
+	// A read that keeps failing loses nothing by giving up: the sweep restarts it.
 	idempotent := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout:    cfg.ActivityStartToClose,
-		ScheduleToCloseTimeout: cfg.PersistWindow,
+		StartToCloseTimeout: cfg.ActivityStartToClose,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval: time.Second,
 			MaximumInterval: 30 * time.Second,
 			MaximumAttempts: 5,
 		},
 	})
+	// A persist holds an answer the supplier already gave, so giving up loses a
+	// confirmation that exists. Bounded by a window, which a count would defeat.
+	persisting := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout:    cfg.ActivityStartToClose,
+		ScheduleToCloseTimeout: cfg.PersistWindow,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval: time.Second,
+			MaximumInterval: 30 * time.Second,
+		},
+	})
+	// A retried call is a second create that no attempt counter ever saw.
 	sending := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: cfg.ActivityStartToClose,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
@@ -85,7 +92,7 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 		}
 
 		var result AttemptResult
-		if err := workflow.ExecuteActivity(idempotent, ActivityApply, bookingID, answer).Get(ctx, &result); err != nil {
+		if err := workflow.ExecuteActivity(persisting, ActivityApply, bookingID, answer).Get(ctx, &result); err != nil {
 			return err
 		}
 
