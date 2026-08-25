@@ -21,6 +21,7 @@ const (
 	ReasonSupplierUnreachable = "supplier_unreachable"
 	ReasonSupplierDeclined    = "supplier_declined"
 	ReasonAttemptAbandoned    = "attempt_abandoned"
+	ReasonRequestBuildFailed  = "request_build_failed"
 )
 
 const (

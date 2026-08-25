@@ -156,6 +156,71 @@
                     }
                 }
             }
+        },
+        "/supplier/callbacks": {
+            "post": {
+                "description": "Authenticated by a shared token. Checks run in order: token, then booking, then status vocabulary, then state. A redelivered callback is a no-op; one contradicting a settled outcome is refused and flagged for recovery.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "callbacks"
+                ],
+                "summary": "Receive a supplier callback",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Shared secret",
+                        "name": "X-Callback-Token",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "description": "Supplier outcome",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/handler.CallbackRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/handler.CallbackResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/handler.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -213,6 +278,48 @@
                 "updatedAt": {
                     "type": "string",
                     "example": "2026-08-24T10:00:00Z"
+                }
+            }
+        },
+        "handler.CallbackRequest": {
+            "type": "object",
+            "required": [
+                "bookingId",
+                "supplierStatus"
+            ],
+            "properties": {
+                "bookingId": {
+                    "type": "string",
+                    "example": "0198f2c4-6d1a-7c3e-9f4b-2f6f0a1d9b10"
+                },
+                "declineReason": {
+                    "type": "string",
+                    "example": "NO_AVAILABILITY"
+                },
+                "supplierReference": {
+                    "type": "string",
+                    "example": "MOCK-0198F2C46D"
+                },
+                "supplierStatus": {
+                    "type": "string",
+                    "example": "CONFIRMED"
+                }
+            }
+        },
+        "handler.CallbackResponse": {
+            "type": "object",
+            "properties": {
+                "applied": {
+                    "type": "boolean",
+                    "example": true
+                },
+                "reason": {
+                    "type": "string",
+                    "example": "duplicate"
+                },
+                "status": {
+                    "type": "string",
+                    "example": "CONFIRMED"
                 }
             }
         },

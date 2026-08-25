@@ -11,7 +11,7 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
 )
 
-func NewEngine(health *handler.Health, booking *handler.Booking, keys repository.APIKeyRepository, swaggerEnabled bool) *gin.Engine {
+func NewEngine(health *handler.Health, booking *handler.Booking, callback *handler.Callback, keys repository.APIKeyRepository, swaggerEnabled bool) *gin.Engine {
 	engine := gin.New()
 
 	// RequestContext runs first so the recovery handler's log line carries the
@@ -23,6 +23,8 @@ func NewEngine(health *handler.Health, booking *handler.Booking, keys repository
 	engine.GET("/readyz", health.Ready)
 
 	// Health and docs stay open; everything a distributor reaches is credentialed.
+	engine.POST("/supplier/callbacks", callback.Receive)
+
 	distributor := engine.Group("", middleware.Authenticate(keys))
 	distributor.POST("/bookings", booking.Create)
 	distributor.GET("/bookings/:bookingId", booking.Get)

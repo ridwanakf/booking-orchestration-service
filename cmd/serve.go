@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,7 +45,19 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 	}
 	defer application.Close()
 
-	engine := rest.NewEngine(handler.NewHealth(application.Ready), handler.NewBooking(application.Booking), application.APIKeys, cfg.SwaggerEnabled)
+	engine := rest.NewEngine(handler.NewHealth(application.Ready), handler.NewBooking(application.Booking),
+		handler.NewCallback(application.Booking, cfg.CallbackToken), application.APIKeys, cfg.SwaggerEnabled)
+
+	// One binary so a reviewer needs nothing but this repository to drive every
+	// supplier scenario. A real deployment would not register it.
+	if cfg.SupplierMock {
+		application.Mock.Register(engine)
+	}
+
+	var background sync.WaitGroup
+	background.Add(2)
+	go func() { defer background.Done(); application.RunWorker(ctx) }()
+	go func() { defer background.Done(); application.Sweeper.Run(ctx) }()
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -84,6 +97,7 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 	if shutdownErr != nil {
 		return fmt.Errorf("http server did not shut down cleanly: %w", shutdownErr)
 	}
+	background.Wait()
 	slog.Info("shutdown complete")
 	return nil
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/ridwanakf/booking-orchestration-service/config"
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
@@ -16,6 +18,9 @@ import (
 	apikeyrepo "github.com/ridwanakf/booking-orchestration-service/internal/repository/apikey"
 	bookingrepo "github.com/ridwanakf/booking-orchestration-service/internal/repository/booking"
 	bookingsvc "github.com/ridwanakf/booking-orchestration-service/internal/service/booking"
+	"github.com/ridwanakf/booking-orchestration-service/internal/supplier"
+	"github.com/ridwanakf/booking-orchestration-service/internal/sweep"
+	"github.com/ridwanakf/booking-orchestration-service/internal/workflow"
 )
 
 type App struct {
@@ -23,8 +28,12 @@ type App struct {
 	pg       *pgxpool.Pool
 	temporal client.Client
 
-	Booking *bookingsvc.Service
-	APIKeys repository.APIKeyRepository
+	Booking     *bookingsvc.Service
+	APIKeys     repository.APIKeyRepository
+	Activities  *workflow.Activities
+	WorkflowCfg workflow.Config
+	Sweeper     *sweep.Sweeper
+	Mock        *supplier.Mock
 }
 
 func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
@@ -44,6 +53,12 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 	}
 
 	repo := bookingrepo.New(pg)
+	wfCfg := workflow.Config{
+		CreateAttempts:       cfg.CreateAttempts,
+		RetrieveDelays:       []time.Duration{cfg.CreateRetryDelay},
+		ParkTimeout:          cfg.ParkTimeout,
+		ActivityStartToClose: cfg.ActivityStartToClose,
+	}
 	orch := orchestrator.NewTemporal(temporal, cfg.TaskQueue, constant.WorkflowParams{
 		CreateAttempts:     cfg.CreateAttempts,
 		RetrieveDelaysSec:  []int{int(cfg.CreateRetryDelay.Seconds())},
@@ -57,6 +72,15 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 		temporal: temporal,
 		Booking:  bookingsvc.New(repo, orch, cfg.SupplierID, slog.Default()),
 		APIKeys:  apikeyrepo.New(pg),
+		Activities: workflow.NewActivities(repo,
+			supplier.NewHTTPClient(cfg.SupplierBaseURL, cfg.SupplierDeadline), wfCfg, slog.Default()),
+		WorkflowCfg: wfCfg,
+		Sweeper: sweep.New(repo, orch, cfg.SweepInterval, repository.StaleThresholds{
+			Marker:   cfg.SweepMarkerThreshold,
+			Received: cfg.SweepReceivedThreshold,
+			Idle:     cfg.SweepIdleThreshold,
+		}, slog.Default()),
+		Mock: supplier.NewMock(cfg.CallbackBaseURL, cfg.CallbackToken, cfg.MockTimeoutHold, cfg.MockCallbackDelay, slog.Default()),
 	}, nil
 }
 
@@ -86,5 +110,34 @@ func (a *App) Close() {
 	}
 	if a.pg != nil {
 		a.pg.Close()
+	}
+}
+
+// RunWorker polls for durable work until the context ends. Starting a worker
+// dials the orchestrator, so this retries in the background rather than
+// returning an error: the API must keep accepting bookings while the
+// orchestrator is down, and a booting worker must not be what stops it.
+func (a *App) RunWorker(ctx context.Context) {
+	for {
+		w := worker.New(a.temporal, a.cfg.TaskQueue, worker.Options{
+			WorkerStopTimeout: a.cfg.ShutdownTimeout,
+		})
+		workflow.Register(w, a.Activities)
+
+		if err := w.Start(); err != nil {
+			slog.WarnContext(ctx, "workflow worker could not start, retrying",
+				"event", "worker.start_failed", "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(a.cfg.WorkerRetryInterval):
+				continue
+			}
+		}
+
+		slog.InfoContext(ctx, "workflow worker started", "task_queue", a.cfg.TaskQueue)
+		<-ctx.Done()
+		w.Stop()
+		return
 	}
 }

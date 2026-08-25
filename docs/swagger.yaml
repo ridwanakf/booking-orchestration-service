@@ -41,6 +41,36 @@ definitions:
         example: "2026-08-24T10:00:00Z"
         type: string
     type: object
+  handler.CallbackRequest:
+    properties:
+      bookingId:
+        example: 0198f2c4-6d1a-7c3e-9f4b-2f6f0a1d9b10
+        type: string
+      declineReason:
+        example: NO_AVAILABILITY
+        type: string
+      supplierReference:
+        example: MOCK-0198F2C46D
+        type: string
+      supplierStatus:
+        example: CONFIRMED
+        type: string
+    required:
+    - bookingId
+    - supplierStatus
+    type: object
+  handler.CallbackResponse:
+    properties:
+      applied:
+        example: true
+        type: boolean
+      reason:
+        example: duplicate
+        type: string
+      status:
+        example: CONFIRMED
+        type: string
+    type: object
   handler.CreateBookingRequest:
     properties:
       checkIn:
@@ -211,4 +241,49 @@ paths:
       summary: Readiness probe
       tags:
       - ops
+  /supplier/callbacks:
+    post:
+      consumes:
+      - application/json
+      description: 'Authenticated by a shared token. Checks run in order: token, then
+        booking, then status vocabulary, then state. A redelivered callback is a no-op;
+        one contradicting a settled outcome is refused and flagged for recovery.'
+      parameters:
+      - description: Shared secret
+        in: header
+        name: X-Callback-Token
+        required: true
+        type: string
+      - description: Supplier outcome
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/handler.CallbackRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.CallbackResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Receive a supplier callback
+      tags:
+      - callbacks
 swagger: "2.0"
