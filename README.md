@@ -38,6 +38,19 @@ make test-integration # needs the stack up: guarded SQL, constraints, the trigge
 
 Readiness deliberately excludes Temporal. A booking commits its row and returns `201` while the orchestrator is down, and the sweep drains the backlog afterwards, so failing readiness on a Temporal outage would pull every replica out of rotation and turn a survivable outage into a total one. Orchestrator reachability is a separate signal.
 
+## Authentication
+
+Distributors authenticate per request with an API key, `bok_<keyId>_<secret>`, sent as a bearer token. Only an Argon2id hash is stored, so the secret is not recoverable from the database. The compose stack seeds one key for `distributor-001`:
+
+```bash
+export KEY='bok_demo01_local-demo-secret'
+curl localhost:8080/bookings/<id> -H "Authorization: Bearer $KEY"
+```
+
+The credential decides the tenant. There is no `distributorId` field in the create payload, so a distributor cannot attribute a booking to anyone else, and reads are scoped to the caller. A booking that belongs to someone else answers `404`, not `403`, so the endpoint does not confirm that it exists.
+
+Supplier callbacks are a separate trust boundary with their own shared token, `X-Callback-Token`, compared in constant time before any state is read.
+
 ## The five scenarios, end to end
 
 The supplier is mocked in-process and picks its behaviour from a suffix on `roomTypeId`, so every failure path is reachable with `curl` alone.
@@ -53,8 +66,10 @@ The supplier is mocked in-process and picks its behaviour from a suffix on `room
 ### 1. Confirmed
 
 ```bash
-curl -X POST localhost:8080/bookings -H 'Content-Type: application/json' -d '{
-  "idempotencyKey": "partner-1", "distributorId": "distributor-001",
+curl -X POST localhost:8080/bookings \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer bok_demo01_local-demo-secret' -d '{
+  "idempotencyKey": "partner-1",
   "propertyId": "hotel-001", "roomTypeId": "room-deluxe-confirm",
   "checkIn": "2026-09-10", "checkOut": "2026-09-12",
   "guest": {"firstName": "Taro", "lastName": "Yamada"}}'
@@ -68,15 +83,18 @@ Same call with `"roomTypeId": "room-deluxe-reject"`. Settles as `REJECTED` with 
 
 ### 3. Timeout, then late confirmation
 
-Same call with `"roomTypeId": "room-deluxe-timeout"`. The supplier holds the connection past the deadline, so the booking sits in `UNKNOWN`, not `FAILED`. Its callback arrives afterwards and moves it to `CONFIRMED`.
+Same call with `"roomTypeId": "room-deluxe-timeout"`. The supplier holds the connection past the deadline, so the booking goes into `UNKNOWN`, not `FAILED`. Its callback arrives afterwards and moves it to `CONFIRMED`.
 
-Poll `GET /bookings/{id}` while it runs and the intermediate state is visible:
+Poll `GET /bookings/{id}` while it runs and the intermediate states are visible:
 
 ```
-t= 3s  UNKNOWN
-t= 6s  UNKNOWN
-t=10s  CONFIRMED   supplierReference: MOCK-...
+t= 0s  PENDING
+t= 4s  PENDING
+t= 8s  UNKNOWN                 the deadline passed with no answer
+t=12s  CONFIRMED  MOCK-...     the late callback resolved it
 ```
+
+Doubt starts at the deadline, not before it. A booking is `PENDING` while its call is in flight and only becomes `UNKNOWN` when the deadline passes with nothing to show for it.
 
 The compose stack sets `SUPPLIER_DEADLINE=8s` and `MOCK_TIMEOUT_HOLD=25s` so this is observable in seconds. The production default deadline is 90s, and the hold must exceed the deadline or the call simply succeeds and nothing times out.
 
@@ -103,7 +121,9 @@ Two identical creates racing each other resolve in the database, not in memory:
 ```bash
 for i in $(seq 1 12); do
   curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/bookings \
-    -H 'Content-Type: application/json' -d '{"idempotencyKey":"race-1", ...}' &
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer bok_demo01_local-demo-secret' \
+    -d '{"idempotencyKey":"race-1", ...}' &
 done; wait
 ```
 
@@ -113,8 +133,8 @@ One `201`, eleven `200`, one row.
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/bookings` | `201` new, `200` replay, `422` key reused with a changed payload, `400` invalid |
-| `GET` | `/bookings/{bookingId}` | `200`, `404` |
+| `POST` | `/bookings` | `201` new, `200` replay, `422` key reused with a changed payload, `400` invalid, `401` no or bad key |
+| `GET` | `/bookings/{bookingId}` | `200`, `404` (also when the booking belongs to another distributor), `401` no or bad key |
 | `POST` | `/supplier/callbacks` | `200` applied or duplicate, `401` bad token, `404` unknown booking, `400` status outside the vocabulary, `409` conflicts a settled state |
 | `GET` | `/healthz` | liveness only |
 | `GET` | `/readyz` | pings the database, and only the database |
@@ -127,8 +147,8 @@ Seven states. `CANCELLED` is modelled and reserved for a cancellation flow this 
 
 | State | Meaning |
 |---|---|
-| `RECEIVED` | committed, nothing sent; provably not sent |
-| `PENDING` | claimed for an attempt, and every prior attempt proved nothing left |
+| `RECEIVED` | committed, nothing sent yet |
+| `PENDING` | a supplier call is in flight, or has been made and answered nothing yet |
 | `UNKNOWN` | a request may have reached the supplier; the outcome is unproven |
 | `CONFIRMED` | the supplier holds the booking, with its reference |
 | `REJECTED` | the supplier declined for a reason we recognize |
@@ -137,7 +157,7 @@ Seven states. `CANCELLED` is modelled and reserved for a cancellation flow this 
 
 Every transition is a guarded update (`UPDATE ... WHERE status = <expected>`) that returns the row's status, so a lost race is a named outcome rather than a silent overwrite. Settled states have no automatic exits.
 
-**The invariant worth reading twice:** the write that authorizes a supplier call sets `UNKNOWN` and increments the attempt counter **before any bytes leave**. A crash mid-call therefore needs no forensics, because the booking is already recorded as in doubt. Only a result that proves nothing was sent moves it back to `PENDING`.
+**The invariant worth reading twice:** the write that authorizes a supplier call records an outstanding attempt in `in_flight_attempt` and increments the attempt counter **before any bytes leave**. Doubt lives in that marker, not in `status`, so a healthy booking runs `RECEIVED -> PENDING -> CONFIRMED` and never enters `UNKNOWN`. A crash while the marker is set resolves to `UNKNOWN`, because an attempt outstanding with no recorded outcome is exactly what unknown means. There is no edge back out: proof that one attempt never left says nothing about an earlier one that may have arrived.
 
 ## Architecture
 
@@ -192,7 +212,7 @@ Deliberately out of scope, each with a reason:
 | Pricing, payments, ledger | This service orchestrates booking state, not money. |
 | Availability search | The supplier is the source of availability truth at booking time; a rejection covers "no rooms". |
 | Real supplier integrations | The client is an interface; this version ships the mock behind it. |
-| Distributor authentication | Single-tenant demo. Per-distributor auth and scoped reads are designed, not built. |
+| Rate limiting and quotas per distributor | The authentication seam is the natural place for it, but metering is a separate concern from booking correctness. |
 | Cancellation and amendment | Designed in full for additive integration (a `CANCELLING` state, durable compensation, supplier-truth callbacks). Amendment needs cancellation first, because most bedbank channels force cancel-and-rebook. |
 | Repriced or partial confirmation | A supplier confirming at a different rate, or confirming some rooms, is a commercial decision needing price, currency, occupancy, and a rate plan. This payload deliberately carries none of them, and modelling it half-way would be worse than refusing it. |
 | HMAC callback signatures | The static shared token is the first thing to replace. Authentication here is defence in depth, not the correctness mechanism: replaying an authenticated payload cannot corrupt state, because processing is idempotent. |
@@ -202,4 +222,4 @@ Known limitations:
 - The mock supplier deduplicates on the reference we send. **Most real hotel suppliers do not**: they echo and index a client reference instead. Against those, a blind retry is unsafe and retrieve-before-retry is the correct strategy, which is why outcome recovery is the first roadmap item rather than a refinement.
 - The park timer is a fixed 24 hours. In production it should be the sooner of that and the booking's free-cancellation deadline, since past that deadline an unseen duplicate stops being refundable. This payload carries no rate plan or cancellation policy, so that rule has no data to work from here.
 - A booking whose workflow fails on every start is restarted indefinitely. It surfaces as the age of the oldest `RECEIVED` row, so it is visible rather than silent, but nothing bounds it automatically.
-- The distributor API is unauthenticated and there is no rate limiting.
+- Distributor API keys are authenticated per request against an Argon2id hash, with no caching. That is a deliberate cost for correctness at this size, and a verified-key cache is the first thing to add under load. There is no rate limiting.
