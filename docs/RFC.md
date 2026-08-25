@@ -43,7 +43,7 @@
 | Guarded transition | A state change applied as `UPDATE ... WHERE status = <expected>`, checked by rows affected |
 | Entry dispatch | The first thing every started or restarted run does: read the row, resolve a set marker to UNKNOWN, and decide from the result. It is what makes a run safe to start against any booking, which is what makes the sweep safe |
 | In-flight marker | `in_flight_attempt`, the attempt number of an outstanding supplier call, set before any bytes leave and cleared by the attempt that set it. Doubt lives here rather than in `status`, which is what keeps a healthy booking out of UNKNOWN |
-| Version | A counter on the booking row, incremented by every write. It is the value returned to a caller and recorded in lineage; see 6.6 for where it is a guard and where it is only a record |
+| Version | A counter on the booking row, incremented by every write. It is the value returned to a caller as an ETag; see 6.6 for where it is a guard and where it is only a record |
 | Lineage | The append-only `booking_events` row written in the same statement as each transition or refusal (6.2). Distinct from workflow history, which is per-execution telemetry |
 | Authorization write | The guarded write that permits one supplier attempt: it sets the in-flight marker and counts the attempt in one statement, before any bytes leave. No supplier call happens without one |
 | Signal | An event delivered to a running workflow; here always a wake-up hint, never the carrier of business truth |
@@ -265,7 +265,7 @@ erDiagram
     }
     BOOKING_EVENTS {
         uuid booking_id FK
-        bigint seq PK-SEQUENCE
+        bigint seq PK "global sequence, never a per-booking MAX"
         timestamptz occurred_at
         text from_status
         text to_status
@@ -291,7 +291,7 @@ Notes:
 - `event_type` is a closed vocabulary drawn from the log vocabulary (6.9), so an `event=` filter and a lineage query name the same thing. It is a **subset**: a lineage row needs a booking, so events that occur without one, a callback for an unknown id or a rejected token, are logged only. Transitions use `booking.transition`; creation uses `booking.created`; refusals use `booking.conflict`, `booking.duplicate_request`, `booking.duplicate_suspect`, or `callback.rejected`; attempts use `supplier.request`, `supplier.response`, `supplier.timeout`, `supplier.callback`; recovery uses `worker.parked` and `sweep.restarted`. The column is named `event_type` rather than `trigger` because `trigger` is a reserved word in SQL.
 - `from_status` equals `to_status` on a refusal, which is how a reader distinguishes "the booking moved" from "something was asserted and declined".
 - `payload_digest` is a hex-encoded SHA-256 of the supplier or callback body that caused the event, and is null for events with no external body (an authorization, a park, a sweep restart). `attempt` is null for events outside a supplier attempt. `occurred_at` defaults to `now()`.
-- Creation appends `seq = 1` with `from_status` null and `event_type = booking.created`, written in the same `INSERT ... ON CONFLICT DO NOTHING` statement that creates the booking. A create that loses the race appends nothing, because it changed nothing.
+- Creation appends its lineage row with `from_status` null and `event_type = booking.created`, written in the same `INSERT ... ON CONFLICT DO NOTHING` statement that creates the booking. `seq` comes from the sequence like every other row; it is not 1 per booking. A create that loses the race appends nothing, because it changed nothing.
 - `payload_digest` is a SHA-256 of the supplier's response body, never the body. `supplier_reason` carries the decline code or error string, which is bounded and safe. A booking payload contains guest names, so storing responses verbatim would spread personal data into a table whose whole purpose is to be kept.
 - Temporal keeps its own tables (workflow history); the booking row is the source of truth for status. Execution history is telemetry, and it is per-execution: a booking restarted by the sweep gets a fresh history, so it can never be the audit trail. That is `booking_events`'s job.
 - `supplier_idempotency_key` holds the reference actually sent to the supplier, which is the booking id encoded down to that supplier's length and charset limit rather than the raw identifier; a unique index on `(supplier_id, supplier_idempotency_key)` keeps the encoding collision-free.
@@ -618,15 +618,32 @@ Each attempt reports one of six outcomes, and the workflow branches on the outco
 - Every attempt is authorized by one guarded statement that counts it and records that a call is outstanding, before any bytes leave:
 
 ```sql
-UPDATE bookings
-SET supplier_attempts   = supplier_attempts + 1,
-    in_flight_attempt   = supplier_attempts + 1,
-    status              = CASE WHEN status = 'RECEIVED' THEN 'PENDING' ELSE status END,
-    version             = version + 1
-WHERE id = $1
-  AND in_flight_attempt IS NULL
-  AND supplier_attempts < $2
-  AND status IN ('RECEIVED', 'PENDING', 'UNKNOWN')
+WITH locked AS (
+    SELECT id, status, supplier_attempts, in_flight_attempt
+    FROM bookings WHERE id = $1 FOR UPDATE
+), authorized AS (
+    UPDATE bookings b
+    SET supplier_attempts = l.supplier_attempts + 1,
+        in_flight_attempt = l.supplier_attempts + 1,
+        status            = CASE WHEN l.status = 'RECEIVED' THEN 'PENDING' ELSE l.status END,
+        version           = b.version + 1,
+        updated_at        = now()
+    FROM locked l
+    WHERE b.id = l.id
+      AND l.in_flight_attempt IS NULL
+      AND l.supplier_attempts < $2
+      AND l.status IN ('RECEIVED', 'PENDING', 'UNKNOWN')
+    RETURNING b.id, l.status AS was, b.status AS now_status, b.supplier_attempts AS attempt
+), logged AS (
+    INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, request_id)
+    SELECT a.id, a.was, a.now_status, 'supplier.request', a.attempt, $3
+    FROM authorized a
+    RETURNING booking_id
+)
+SELECT (SELECT attempt FROM authorized),
+       (SELECT now_status FROM authorized),
+       (SELECT status FROM locked),
+       (SELECT supplier_attempts FROM locked);
 ```
 
   It appends its own `booking_events` row in the same statement, like every other write that moves a booking, with `event_type = supplier.request`. The counter is exact and no attempt can run uncounted. `in_flight_attempt IS NULL` in the guard is what stops two attempts running at once. Status moves only on the first attempt, out of RECEIVED, so a healthy booking is never written as in doubt.
@@ -655,7 +672,7 @@ Every write is guarded on its **business precondition**, and every write **recor
 
 ```sql
 WITH locked AS (
-    SELECT id, status, version FROM bookings WHERE id = $1 FOR UPDATE
+    SELECT id, status, version, in_flight_attempt FROM bookings WHERE id = $1 FOR UPDATE
 ), moved AS (
     UPDATE bookings b
     SET status = $2, version = b.version + 1, updated_at = now()
@@ -688,7 +705,7 @@ Row locking precedes the read of the prior status. A subquery reading the row se
 | Guard on `status` | "is this transition still legal?" | This is the guard. It expresses a business precondition, so a concurrent unrelated write does not invalidate a legal transition |
 | Guard on `version` too | "has anything changed since I read?" | Nothing. The read and the write are the **same statement**, under `FOR UPDATE`, so there is no window between them for anything to change. It would add a retry loop guarding an interval that does not exist |
 
-Where a version guard genuinely earns its place is a caller that reads in one request and writes in a later one. That is why `version` is returned as an `ETag`: the moment a mutating distributor endpoint exists (cancellation, 8.3), it accepts `If-Match`, guards on the version, and answers `409 version_conflict` on a stale one. Until then the column is a recorded value and a lineage anchor, and the RFC says so rather than implying a protection that is not doing any work.
+Where a version guard genuinely earns its place is a caller that reads in one request and writes in a later one. That is why `version` is returned as an `ETag`: the moment a mutating distributor endpoint exists (cancellation, 8.3), it accepts `If-Match`, guards on the version, and answers `409 version_conflict` on a stale one. Until then the column is a recorded value returned to callers, and the RFC says so rather than implying a protection that is not doing any work.
 
 The lineage insert shares the statement, so a transition and its record cannot diverge. Refusals, which perform no update, are written by their own single `INSERT`; there is nothing for them to diverge from, because nothing changed.
 
