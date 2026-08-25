@@ -1,0 +1,59 @@
+basePath: /
+definitions:
+  handler.ErrorResponse:
+    properties:
+      code:
+        example: booking_not_found
+        type: string
+      detail:
+        type: string
+      message:
+        example: booking not found
+        type: string
+      status:
+        example: error
+        type: string
+    type: object
+info:
+  contact: {}
+  description: |-
+    Orchestrates hotel bookings between travel distributors and unreliable suppliers.
+    A supplier timeout is an unknown outcome, never a rejection.
+  title: Booking Orchestration API
+  version: "1.0"
+paths:
+  /healthz:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Liveness probe
+      tags:
+      - ops
+  /readyz:
+    get:
+      description: Reports whether the backing dependencies answer. Both clients connect
+        lazily, so liveness alone proves nothing about them.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Readiness probe
+      tags:
+      - ops
+swagger: "2.0"
