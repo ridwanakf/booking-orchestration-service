@@ -1,0 +1,19 @@
+# Binaries
+/booking-orchestrator
+/booking-orchestration-service
+*.exe
+*.test
+*.out
+
+# Local environment
+.env
+.env.local
+
+# Working context, not part of the project
+.claude/
+CLAUDE.md
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
