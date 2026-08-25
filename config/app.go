@@ -20,6 +20,7 @@ type AppConfig struct {
 	ParkTimeout          time.Duration
 	CreateRetryDelay     time.Duration
 	ActivityStartToClose time.Duration
+	PersistWindow        time.Duration
 	MockTimeoutHold      time.Duration
 	MockCallbackDelay    time.Duration
 

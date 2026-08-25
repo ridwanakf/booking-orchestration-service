@@ -34,6 +34,9 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 	gin.SetMode(gin.ReleaseMode)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	// Every exit path must cancel the context, or the background goroutines are
+	// still running when the deferred Close pulls the pool out from under them.
+	defer stop()
 
 	if err := migrate.Up(ctx, cfg.PostgresDSN); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
@@ -93,11 +96,12 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 
 	// Joined before the deferred Close tears down the pool and the orchestrator
 	// client: an activity still finishing a supplier call needs both.
+	stop()
+	background.Wait()
 
 	if shutdownErr != nil {
 		return fmt.Errorf("http server did not shut down cleanly: %w", shutdownErr)
 	}
-	background.Wait()
 	slog.Info("shutdown complete")
 	return nil
 }

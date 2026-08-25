@@ -9,6 +9,8 @@ import (
 )
 
 type Orchestrator interface {
-	StartBooking(ctx context.Context, bookingID uuid.UUID) error
+	// Reports whether a new execution was created. False means one was already
+	// running, which is harmless but is not a restart.
+	StartBooking(ctx context.Context, bookingID uuid.UUID) (bool, error)
 	SignalOutcome(ctx context.Context, bookingID uuid.UUID, status string) error
 }

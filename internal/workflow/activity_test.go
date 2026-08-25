@@ -20,6 +20,8 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/workflow"
 )
 
+const attemptBudget = 2
+
 type ActivitySuite struct {
 	suite.Suite
 	ctrl     *gomock.Controller
@@ -38,7 +40,7 @@ func (s *ActivitySuite) SetupTest() {
 	s.ctrl = gomock.NewController(s.T())
 	s.repo = repomocks.NewMockBookingRepository(s.ctrl)
 	s.supplier = suppliermocks.NewMockClient(s.ctrl)
-	s.act = workflow.NewActivities(s.repo, s.supplier, workflow.Config{CreateAttempts: 2},
+	s.act = workflow.NewActivities(s.repo, s.supplier,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	s.ctx = context.Background()
 	s.id = uuid.New()
@@ -60,7 +62,7 @@ func (s *ActivitySuite) attempt(previous model.Status, answer supplier.Result) w
 		Return(repository.Authorization{Attempt: 1, Previous: previous}, nil)
 	s.supplier.EXPECT().Book(gomock.Any(), gomock.Any()).Return(answer)
 
-	got, err := s.act.Attempt(s.ctx, s.id.String())
+	got, err := s.act.Attempt(s.ctx, s.id.String(), attemptBudget)
 	s.Require().NoError(err)
 
 	applied, err := s.act.Apply(s.ctx, s.id.String(), got)
@@ -162,7 +164,7 @@ func (s *ActivitySuite) TestAnOutstandingAttemptMakesThisRunExitRatherThanPark()
 		Return(repository.Authorization{Previous: model.StatusPending, Refusal: repository.RefusalAttemptOutstanding},
 			constant.ErrTransitionConflict)
 
-	answer, err := s.act.Attempt(s.ctx, s.id.String())
+	answer, err := s.act.Attempt(s.ctx, s.id.String(), attemptBudget)
 	s.Require().NoError(err)
 	got, err := s.act.Apply(s.ctx, s.id.String(), answer)
 
@@ -176,7 +178,7 @@ func (s *ActivitySuite) TestASpentBudgetParks() {
 		Return(repository.Authorization{Previous: model.StatusUnknown, Refusal: repository.RefusalBudgetSpent},
 			constant.ErrTransitionConflict)
 
-	answer, err := s.act.Attempt(s.ctx, s.id.String())
+	answer, err := s.act.Attempt(s.ctx, s.id.String(), attemptBudget)
 	s.Require().NoError(err)
 	got, err := s.act.Apply(s.ctx, s.id.String(), answer)
 
@@ -187,7 +189,7 @@ func (s *ActivitySuite) TestASpentBudgetParks() {
 func (s *ActivitySuite) TestASettledBookingIsNeverSentAgain() {
 	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.booking(model.StatusConfirmed), nil)
 
-	answer, err := s.act.Attempt(s.ctx, s.id.String())
+	answer, err := s.act.Attempt(s.ctx, s.id.String(), attemptBudget)
 	s.Require().NoError(err)
 	got, err := s.act.Apply(s.ctx, s.id.String(), answer)
 

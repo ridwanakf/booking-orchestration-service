@@ -43,10 +43,9 @@ func (r *Repo) ResolveStaleMarker(ctx context.Context, id uuid.UUID, requestID *
 	return *stale, true, nil
 }
 
-// Authorize precedes every supplier call: it counts the attempt and records that
-// one is outstanding, before any bytes leave. Status moves only on the first
-// attempt, so a healthy booking is never written as in doubt. The IS NULL guard
-// is what stops two attempts running at once.
+// Precedes every supplier call: counts the attempt and records that one is
+// outstanding, before any bytes leave. Status moves only on the first attempt,
+// so a healthy booking is never written as in doubt.
 func (r *Repo) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, supplierKey string, requestID *string) (repository.Authorization, error) {
 	var attempt, marker, attemptsSoFar *int
 	var previous *model.Status
@@ -102,8 +101,9 @@ func (r *Repo) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, sup
 	return out, fmt.Errorf("%w: status %s", constant.ErrTransitionConflict, *previous)
 }
 
-// ParkIfUnknown flags for recovery only while the booking is in doubt with
-// nothing outstanding, so one that settles in the gap is never flagged.
+// Flags for recovery while the booking is in doubt with nothing outstanding.
+// Idempotent: an already-flagged booking still reports parked, because the
+// caller must arm its window either way, but only the first park records it.
 func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID, requestID *string) (bool, error) {
 	var parked *bool
 	err := r.db.QueryRow(ctx, `
@@ -113,11 +113,11 @@ func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID, requestID *strin
 			UPDATE bookings b
 			SET needs_recovery = TRUE, version = b.version + 1, updated_at = now()
 			FROM locked l
-			WHERE b.id = l.id AND l.status = 'UNKNOWN' AND l.in_flight_attempt IS NULL AND NOT l.needs_recovery
-			RETURNING b.id, b.supplier_attempts
+			WHERE b.id = l.id AND l.status = 'UNKNOWN' AND l.in_flight_attempt IS NULL
+			RETURNING b.id, b.supplier_attempts, l.needs_recovery AS was_flagged
 		), logged AS (
 			INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, request_id)
-			SELECT id, 'UNKNOWN', 'UNKNOWN', $2, supplier_attempts, $3 FROM parked
+			SELECT id, 'UNKNOWN', 'UNKNOWN', $2, supplier_attempts, $3 FROM parked WHERE NOT was_flagged
 			RETURNING booking_id
 		)
 		SELECT (SELECT TRUE FROM parked)`, id, model.EventParked, requestID).Scan(&parked)

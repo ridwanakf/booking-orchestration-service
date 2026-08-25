@@ -78,14 +78,14 @@ func (s *SweepSuite) runUntilFirstPass(stale []uuid.UUID, queryErr error) {
 
 func (s *SweepSuite) recordStarts(failFor uuid.UUID) {
 	s.starter.EXPECT().StartBooking(gomock.Any(), gomock.Any()).
-		DoAndReturn(func(_ context.Context, id uuid.UUID) error {
+		DoAndReturn(func(_ context.Context, id uuid.UUID) (bool, error) {
 			s.mu.Lock()
 			s.started = append(s.started, id)
 			s.mu.Unlock()
 			if id == failFor {
-				return errors.New("temporal unavailable")
+				return false, errors.New("temporal unavailable")
 			}
-			return nil
+			return true, nil
 		}).AnyTimes()
 }
 
@@ -126,4 +126,21 @@ func (s *SweepSuite) TestNothingStaleStartsNothing() {
 	s.runUntilFirstPass(nil, nil)
 
 	s.Empty(s.startedIDs())
+}
+
+// An execution that is already open is not a restart. Logging it as one would
+// make a booking wedged behind a stuck run look like recovery working.
+func (s *SweepSuite) TestAnAlreadyRunningBookingIsNotCountedAsRestarted() {
+	stale := uuid.New()
+	s.starter.EXPECT().StartBooking(gomock.Any(), stale).
+		DoAndReturn(func(_ context.Context, id uuid.UUID) (bool, error) {
+			s.mu.Lock()
+			s.started = append(s.started, id)
+			s.mu.Unlock()
+			return false, nil
+		}).AnyTimes()
+
+	s.runUntilFirstPass([]uuid.UUID{stale}, nil)
+
+	s.Contains(s.startedIDs(), stale, "it is still asked for, it is just not a restart")
 }

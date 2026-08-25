@@ -72,7 +72,7 @@ func (s *ServiceSuite) expectNoDuplicateSuspect() {
 func (s *ServiceSuite) TestCreatePersistsAndStartsWorkflow() {
 	s.expectInsert()
 	s.expectNoDuplicateSuspect()
-	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(nil)
+	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(true, nil)
 
 	b, created, err := s.svc.Create(s.ctx, s.req)
 
@@ -88,7 +88,7 @@ func (s *ServiceSuite) TestCreatePersistsAndStartsWorkflow() {
 func (s *ServiceSuite) TestCreateSucceedsWhenTheOrchestratorIsDown() {
 	s.expectInsert()
 	s.expectNoDuplicateSuspect()
-	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(errors.New("temporal unavailable"))
+	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(false, errors.New("temporal unavailable"))
 
 	b, created, err := s.svc.Create(s.ctx, s.req)
 
@@ -134,7 +134,7 @@ func (s *ServiceSuite) TestCreateIsUnaffectedByADuplicateSuspectHit() {
 	s.expectInsert()
 	s.repo.EXPECT().FindPriorByFingerprint(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(uuid.New(), true, nil)
-	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(nil)
+	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(true, nil)
 
 	b, created, err := s.svc.Create(s.ctx, s.req)
 
@@ -147,7 +147,7 @@ func (s *ServiceSuite) TestCreateIsUnaffectedByADuplicateSuspectLookupFailure() 
 	s.expectInsert()
 	s.repo.EXPECT().FindPriorByFingerprint(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(uuid.Nil, false, errors.New("query failed"))
-	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(nil)
+	s.orch.EXPECT().StartBooking(gomock.Any(), gomock.Any()).Return(true, nil)
 
 	_, created, err := s.svc.Create(s.ctx, s.req)
 

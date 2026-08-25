@@ -34,17 +34,17 @@ func (s *WorkflowSuite) SetupTest() {
 	s.env = s.NewTestWorkflowEnvironment()
 	s.bookingID = uuid.NewString()
 	s.params = constant.WorkflowParams{
-		CreateAttempts:     2,
-		RetrieveDelaysSec:  []int{30, 60},
-		ParkTimeoutSec:     int((24 * time.Hour).Seconds()),
-		ActivityTimeoutSec: 105,
+		CreateAttempts:  2,
+		RetryDelays:     []time.Duration{30 * time.Second},
+		ParkTimeout:     24 * time.Hour,
+		ActivityTimeout: 105 * time.Second,
+		PersistWindow:   10 * time.Minute,
 	}
 
 	ctrl := gomock.NewController(s.T())
 	acts := workflow.NewActivities(
 		repomocks.NewMockBookingRepository(ctrl),
 		suppliermocks.NewMockClient(ctrl),
-		workflow.Config{CreateAttempts: 2},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	workflow.Register(s.env, acts)
@@ -54,10 +54,12 @@ func (s *WorkflowSuite) AfterTest(_, _ string) {
 	s.env.AssertExpectations(s.T())
 }
 
-func (s *WorkflowSuite) run() {
+func (s *WorkflowSuite) run() time.Duration {
+	start := s.env.Now()
 	s.env.ExecuteWorkflow(constant.WorkflowBooking, s.bookingID, s.params)
 	s.True(s.env.IsWorkflowCompleted())
 	s.NoError(s.env.GetWorkflowError())
+	return s.env.Now().Sub(start)
 }
 
 func (s *WorkflowSuite) onLoad(status string) {
@@ -65,7 +67,7 @@ func (s *WorkflowSuite) onLoad(status string) {
 }
 
 func (s *WorkflowSuite) onAttempt(outcome workflow.Outcome, times int) {
-	s.env.OnActivity(workflow.ActivityAttempt, mock.Anything, s.bookingID).
+	s.env.OnActivity(workflow.ActivityAttempt, mock.Anything, s.bookingID, s.params.CreateAttempts).
 		Return(workflow.Answer{Attempt: 1}, nil).Times(times)
 	s.env.OnActivity(workflow.ActivityApply, mock.Anything, s.bookingID, mock.Anything).
 		Return(workflow.AttemptResult{Outcome: outcome}, nil).Times(times)
@@ -77,7 +79,7 @@ func (s *WorkflowSuite) onAttempt(outcome workflow.Outcome, times int) {
 // never registered passes whether or not it ran.
 func (s *WorkflowSuite) TestASettledBookingSendsNothingOnEntry() {
 	s.onLoad("CONFIRMED")
-	s.env.OnActivity(workflow.ActivityAttempt, mock.Anything, s.bookingID).
+	s.env.OnActivity(workflow.ActivityAttempt, mock.Anything, s.bookingID, s.params.CreateAttempts).
 		Run(func(mock.Arguments) {
 			s.Fail("a settled booking must never reach the supplier")
 		}).Return(workflow.Answer{}, nil).Maybe()
@@ -140,9 +142,14 @@ func (s *WorkflowSuite) TestAParkedBookingIsResolvedByALateCallback() {
 		s.env.SignalWorkflow(constant.SignalSupplierOutcome, "CONFIRMED")
 	}, 2*time.Minute)
 
-	s.run()
+	elapsed := s.run()
+
+	s.Less(elapsed, s.params.ParkTimeout,
+		"the signal must end the wait; otherwise a late callback is ignored for a day")
 }
 
+// Nothing resolves it, so the bounded timer ends the run rather than leaking an
+// execution forever.
 // Nothing resolves it, so the bounded timer ends the run rather than leaking an
 // execution forever.
 func (s *WorkflowSuite) TestAParkedBookingGivesUpOnItsTimer() {
@@ -150,26 +157,37 @@ func (s *WorkflowSuite) TestAParkedBookingGivesUpOnItsTimer() {
 	s.onAttempt(workflow.OutcomeAmbiguous, 2)
 	s.env.OnActivity(workflow.ActivityPark, mock.Anything, s.bookingID).Return(true, nil).Once()
 
-	s.run()
+	elapsed := s.run()
+
+	s.GreaterOrEqual(elapsed, s.params.ParkTimeout, "the run must hold its full recovery window")
 }
 
 // Park reported that nothing needs waiting for, either because the booking
 // settled or because it was unreachable and is now FAILED.
+// Park reported nothing to wait for, either because the booking settled or
+// because it was called unreachable. Holding a 24h timer on a finished booking
+// would leak an execution per failure.
 func (s *WorkflowSuite) TestNoWaitWhenParkHasNothingToHoldOpen() {
 	s.onLoad("RECEIVED")
 	s.onAttempt(workflow.OutcomeAmbiguous, 2)
 	s.env.OnActivity(workflow.ActivityPark, mock.Anything, s.bookingID).Return(false, nil).Once()
 
-	s.run()
+	elapsed := s.run()
+
+	s.Less(elapsed, s.params.ParkTimeout, "no window should be armed")
 }
 
 // The schedule comes from workflow input, not process configuration, so a
 // replay reproduces the history it recorded even if the deployment changed.
-func (s *WorkflowSuite) TestTheScheduleComesFromInput() {
-	s.params.CreateAttempts = 1
+// The schedule comes from workflow input, not process configuration, so a
+// replay reproduces the history it recorded even if the deployment changed.
+func (s *WorkflowSuite) TestTheRetryDelayComesFromInput() {
+	s.params.RetryDelays = []time.Duration{9 * time.Minute}
 	s.onLoad("RECEIVED")
-	s.onAttempt(workflow.OutcomeAmbiguous, 1)
-	s.env.OnActivity(workflow.ActivityPark, mock.Anything, s.bookingID).Return(true, nil).Once()
+	s.onAttempt(workflow.OutcomeAmbiguous, 2)
+	s.env.OnActivity(workflow.ActivityPark, mock.Anything, s.bookingID).Return(false, nil).Once()
 
-	s.run()
+	elapsed := s.run()
+
+	s.GreaterOrEqual(elapsed, 9*time.Minute, "the wait between attempts is the one recorded in history")
 }

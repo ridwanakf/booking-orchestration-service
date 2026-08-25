@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,6 +14,11 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/observability"
 	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
 	"github.com/ridwanakf/booking-orchestration-service/internal/supplier"
+)
+
+const (
+	preAuthorizeReads   = 3
+	preAuthorizeBackoff = 250 * time.Millisecond
 )
 
 const (
@@ -40,15 +46,17 @@ type Answer struct {
 	LatencyMS int64
 }
 
+// Holds no configuration: every bound an activity applies arrives as workflow
+// input, so a worker restarted with new settings cannot disagree with a run
+// already in flight.
 type Activities struct {
 	repo     repository.BookingRepository
 	supplier supplier.Client
-	cfg      Config
 	log      *slog.Logger
 }
 
-func NewActivities(repo repository.BookingRepository, client supplier.Client, cfg Config, log *slog.Logger) *Activities {
-	return &Activities{repo: repo, supplier: client, cfg: cfg, log: log}
+func NewActivities(repo repository.BookingRepository, client supplier.Client, log *slog.Logger) *Activities {
+	return &Activities{repo: repo, supplier: client, log: log}
 }
 
 // Dispatch is the first thing every started or restarted run does. Resolving a
@@ -78,13 +86,16 @@ func (a *Activities) Dispatch(ctx context.Context, bookingID string) (string, er
 
 // Attempt authorizes one supplier call and makes it. Authorization commits
 // before any bytes leave, so a crash below this line needs no forensics.
-func (a *Activities) Attempt(ctx context.Context, bookingID string) (Answer, error) {
+func (a *Activities) Attempt(ctx context.Context, bookingID string, budget int) (Answer, error) {
 	id, err := uuid.Parse(bookingID)
 	if err != nil {
 		return Answer{}, fmt.Errorf("parse booking id: %w", err)
 	}
 
-	b, err := a.repo.GetByID(ctx, id)
+	// Retried here rather than by the activity policy: nothing has been
+	// authorized yet, so this read is safe to repeat, while a retry of the
+	// activity as a whole would consume a second attempt from the budget.
+	b, err := a.readBeforeAuthorizing(ctx, id)
 	if err != nil {
 		return Answer{}, err
 	}
@@ -92,7 +103,10 @@ func (a *Activities) Attempt(ctx context.Context, bookingID string) (Answer, err
 		return Answer{Outcome: outcomeAlreadySettled}, nil
 	}
 
-	auth, err := a.repo.Authorize(ctx, id, a.cfg.CreateAttempts, supplier.IdempotencyKey(bookingID), observability.RequestIDPtr(ctx))
+	// The budget comes from workflow input, not process config: the durable
+	// guard and the loop that counts on it must be the same number, or a deploy
+	// that changes it leaves a running workflow disagreeing with its own rows.
+	auth, err := a.repo.Authorize(ctx, id, budget, supplier.IdempotencyKey(bookingID), observability.RequestIDPtr(ctx))
 	if err != nil {
 		if !errors.Is(err, constant.ErrTransitionConflict) {
 			return Answer{}, err
@@ -101,10 +115,14 @@ func (a *Activities) Attempt(ctx context.Context, bookingID string) (Answer, err
 		switch auth.Refusal {
 		case repository.RefusalSettled:
 			return Answer{Outcome: outcomeAlreadySettled}, nil
-		case repository.RefusalAttemptOutstanding:
-			return Answer{Outcome: outcomeOutstanding, From: auth.Previous}, nil
-		default:
+		case repository.RefusalBudgetSpent:
 			return Answer{Outcome: outcomeBudgetSpent, From: auth.Previous}, nil
+		default:
+			// RefusalAttemptOutstanding, and anything unclassified. The safe
+			// reading is "someone else may be mid-call", never "stop trying":
+			// parking on a zero value settles a booking FAILED while a request
+			// may be live at the supplier.
+			return Answer{Outcome: outcomeOutstanding, From: auth.Previous}, nil
 		}
 	}
 
@@ -168,7 +186,7 @@ func (a *Activities) Park(ctx context.Context, bookingID string) (bool, error) {
 
 	if b.Status == model.StatusPending {
 		reason := constant.ReasonSupplierUnreachable
-		_, err := a.repo.Apply(ctx, id, repository.Transition{
+		applied, err := a.repo.Apply(ctx, id, repository.Transition{
 			From: model.StatusPending, To: model.StatusFailed,
 			Marker: repository.MarkerClear, EventType: model.EventTransition,
 			FailureReason: &reason, RequestID: requestID,
@@ -176,10 +194,20 @@ func (a *Activities) Park(ctx context.Context, bookingID string) (bool, error) {
 		if err != nil && !errors.Is(err, constant.ErrTransitionConflict) {
 			return false, err
 		}
-		a.log.ErrorContext(ctx, "every attempt was proven not sent and the budget is spent",
-			"event", model.EventTransition, "booking_id", bookingID,
-			"reason", reason, "attempts", b.SupplierAttempts)
-		return false, nil
+		if err == nil {
+			a.log.ErrorContext(ctx, "every attempt was proven not sent and the budget is spent",
+				"event", model.EventTransition, "booking_id", bookingID,
+				"reason", reason, "attempts", b.SupplierAttempts)
+			return false, nil
+		}
+		// The booking moved between the read and the write. Anything but a
+		// settled outcome still needs its recovery window armed, and asserting
+		// "proven not sent" here would be a durable lie about a live booking.
+		a.log.InfoContext(ctx, "booking moved before it could be called unreachable",
+			"event", model.EventTransition, "booking_id", bookingID, "status", applied)
+		if applied.Settled() {
+			return false, nil
+		}
 	}
 
 	parked, err := a.repo.ParkIfUnknown(ctx, id, requestID)
@@ -215,10 +243,14 @@ func (a *Activities) apply(ctx context.Context, id uuid.UUID, answer Answer) (At
 		// The one result that may leave the row in PENDING: nothing left, so
 		// the marker clears and the status does not move.
 		a.event(ctx, model.EventSupplierRequest, id, attempt, "outcome", "not_sent", "reason", answer.Reason)
-		if _, err := a.repo.ClearMarker(ctx, id, attempt, model.Event{
+		cleared, err := a.repo.ClearMarker(ctx, id, attempt, model.Event{
 			EventType: model.EventSupplierRequest, RequestID: requestID, SupplierReason: &answer.Reason,
-		}); err != nil {
+		})
+		if err != nil {
 			return AttemptResult{}, err
+		}
+		if !cleared {
+			return a.superseded(ctx, id, answer, requestID)
 		}
 		return AttemptResult{Outcome: OutcomeNotSent, Attempt: attempt, Reason: answer.Reason}, nil
 
@@ -243,11 +275,13 @@ func (a *Activities) settle(ctx context.Context, id uuid.UUID, answer Answer, to
 	})
 	switch {
 	case errors.Is(err, constant.ErrAttemptSuperseded):
-		// Recorded as a conflict by the repository, because an answer for a
-		// superseded attempt is evidence of a second reservation.
+		// Already recorded as a conflict by the repository.
 		return AttemptResult{Outcome: OutcomeSettled, Reason: "superseded"}, nil
 	case errors.Is(err, constant.ErrTransitionConflict):
-		return AttemptResult{Outcome: OutcomeSettled}, nil
+		// The booking moved on while this call was outstanding, so the answer
+		// belongs to a state that no longer exists. It is still evidence of a
+		// reservation, so it is recorded rather than discarded.
+		return a.superseded(ctx, id, answer, requestID)
 	case err != nil:
 		return AttemptResult{}, err
 	}
@@ -265,10 +299,14 @@ func (a *Activities) ambiguous(ctx context.Context, id uuid.UUID, answer Answer,
 	a.event(ctx, model.EventSupplierTimeout, id, answer.Attempt, "reason", answer.Reason)
 
 	if answer.From == model.StatusUnknown {
-		if _, err := a.repo.ClearMarker(ctx, id, answer.Attempt, model.Event{
+		cleared, err := a.repo.ClearMarker(ctx, id, answer.Attempt, model.Event{
 			EventType: model.EventSupplierTimeout, RequestID: requestID, SupplierReason: &answer.Reason,
-		}); err != nil {
+		})
+		if err != nil {
 			return AttemptResult{}, err
+		}
+		if !cleared {
+			return a.superseded(ctx, id, answer, requestID)
 		}
 		return AttemptResult{Outcome: OutcomeAmbiguous, Attempt: answer.Attempt, Reason: answer.Reason}, nil
 	}
@@ -290,10 +328,14 @@ func (a *Activities) preSendFailure(ctx context.Context, id uuid.UUID, answer An
 	a.event(ctx, model.EventTransition, id, answer.Attempt, "outcome", "pre_send_failure", "reason", answer.Reason)
 
 	if answer.From == model.StatusUnknown {
-		if _, err := a.repo.ClearMarker(ctx, id, answer.Attempt, model.Event{
+		cleared, err := a.repo.ClearMarker(ctx, id, answer.Attempt, model.Event{
 			EventType: model.EventTransition, RequestID: requestID, SupplierReason: &answer.Reason,
-		}); err != nil {
+		})
+		if err != nil {
 			return AttemptResult{}, err
+		}
+		if !cleared {
+			return a.superseded(ctx, id, answer, requestID)
 		}
 		return AttemptResult{Outcome: OutcomeInDoubt, Attempt: answer.Attempt, Reason: answer.Reason}, nil
 	}
@@ -314,4 +356,55 @@ func (a *Activities) preSendFailure(ctx context.Context, id uuid.UUID, answer An
 func (a *Activities) event(ctx context.Context, event string, id uuid.UUID, attempt int, kv ...any) {
 	args := append([]any{"event", event, "booking_id", id.String(), "attempt", attempt}, kv...)
 	a.log.InfoContext(ctx, "supplier attempt outcome", args...)
+}
+
+// superseded records what a supplier said for an attempt whose write no longer
+// applies. Dropping it would leave a real reservation with nothing in the
+// ledger pointing at it, which is the most expensive silence in the system.
+func (a *Activities) superseded(ctx context.Context, id uuid.UUID, answer Answer, requestID *string) (AttemptResult, error) {
+	status := string(answer.Outcome)
+	reason := fmt.Sprintf("attempt %d answered %s after the booking moved on", answer.Attempt, answer.Outcome)
+	e := model.Event{
+		EventType: model.EventConflict, Attempt: &answer.Attempt,
+		RequestID: requestID, SupplierStatusCode: &status, SupplierReason: &reason,
+	}
+	if answer.Reference != "" {
+		e.PayloadDigest = &answer.Reference
+	}
+
+	b, err := a.repo.GetByID(ctx, id)
+	if err != nil {
+		return AttemptResult{}, err
+	}
+	e.ToStatus = b.Status
+
+	a.log.ErrorContext(ctx, "supplier answered an attempt that had been superseded",
+		"event", model.EventConflict, "booking_id", id, "attempt", answer.Attempt,
+		"outcome", answer.Outcome, "reference", answer.Reference, "status", b.Status)
+
+	if err := a.repo.AppendRefusal(ctx, id, e); err != nil {
+		return AttemptResult{}, err
+	}
+	return AttemptResult{Outcome: OutcomeSettled, Attempt: answer.Attempt, Reason: "superseded"}, nil
+}
+
+// readBeforeAuthorizing retries a read that has authorized nothing yet, so a
+// transient database blip does not fail a run that has touched no supplier.
+func (a *Activities) readBeforeAuthorizing(ctx context.Context, id uuid.UUID) (*model.Booking, error) {
+	var err error
+	for attempt := range preAuthorizeReads {
+		var b *model.Booking
+		if b, err = a.repo.GetByID(ctx, id); err == nil {
+			return b, nil
+		}
+		if errors.Is(err, constant.ErrBookingNotFound) || attempt == preAuthorizeReads-1 {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(preAuthorizeBackoff):
+		}
+	}
+	return nil, err
 }

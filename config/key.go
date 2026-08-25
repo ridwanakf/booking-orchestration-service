@@ -26,6 +26,7 @@ const (
 	keySweepIdleThreshold     = "SWEEP_IDLE_THRESHOLD"
 
 	keyShutdownTimeout     = "SHUTDOWN_TIMEOUT"
+	keyPersistWindow       = "PERSIST_WINDOW"
 	keyWorkerRetryInterval = "WORKER_RETRY_INTERVAL"
 
 	keySwaggerEnabled = "SWAGGER_ENABLED"

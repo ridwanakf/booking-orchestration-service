@@ -63,10 +63,15 @@ func Load() (AppConfig, error) {
 		// outlast the supplier call rather than pre-empt it.
 		loaded.ActivityStartToClose = loaded.SupplierDeadline + 15*time.Second
 
+		// How long a persist may keep retrying. It holds an answer the supplier
+		// already gave, so it is generous by design.
+		loaded.PersistWindow = l.dur(keyPersistWindow, 10*time.Minute)
+
 		// A marker older than one deadline plus its backstop cannot have a live
 		// call behind it, so it is derived rather than set independently.
 		loaded.SweepMarkerThreshold = l.dur(keySweepMarkerThreshold, loaded.ActivityStartToClose+15*time.Second)
 
+		l.validate(loaded)
 		loadErr = errors.Join(l.errs...)
 	})
 	return loaded, loadErr
@@ -128,4 +133,43 @@ func (l *loader) boolean(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// validate catches values that parse but leave a subsystem silently dead. A
+// zero sweep interval panics a background goroutine after a clean boot; a zero
+// attempt budget makes the workflow loop unreachable so every booking is
+// restarted forever; a shutdown shorter than the supplier deadline manufactures
+// the unknown outcome the whole design exists to avoid.
+func (l *loader) validate(c AppConfig) {
+	positive := map[string]time.Duration{
+		"SUPPLIER_DEADLINE":        c.SupplierDeadline,
+		"PARK_TIMEOUT":             c.ParkTimeout,
+		"CREATE_RETRY_DELAY":       c.CreateRetryDelay,
+		"SWEEP_INTERVAL":           c.SweepInterval,
+		"SWEEP_MARKER_THRESHOLD":   c.SweepMarkerThreshold,
+		"SWEEP_RECEIVED_THRESHOLD": c.SweepReceivedThreshold,
+		"SWEEP_IDLE_THRESHOLD":     c.SweepIdleThreshold,
+		"SHUTDOWN_TIMEOUT":         c.ShutdownTimeout,
+		"PERSIST_WINDOW":           c.PersistWindow,
+		"WORKER_RETRY_INTERVAL":    c.WorkerRetryInterval,
+	}
+	for key, d := range positive {
+		if d <= 0 {
+			l.errs = append(l.errs, fmt.Errorf("%s must be positive, got %s", key, d))
+		}
+	}
+
+	if c.CreateAttempts < 1 {
+		l.errs = append(l.errs, fmt.Errorf("CREATE_ATTEMPTS must be at least 1, got %d", c.CreateAttempts))
+	}
+	if c.ShutdownTimeout <= c.SupplierDeadline {
+		l.errs = append(l.errs, fmt.Errorf(
+			"SHUTDOWN_TIMEOUT (%s) must exceed SUPPLIER_DEADLINE (%s), or a deploy force-closes a call in flight",
+			c.ShutdownTimeout, c.SupplierDeadline))
+	}
+	if c.SweepMarkerThreshold <= c.ActivityStartToClose {
+		l.errs = append(l.errs, fmt.Errorf(
+			"SWEEP_MARKER_THRESHOLD (%s) must exceed the activity backstop (%s), or the sweep restarts bookings whose call is still live",
+			c.SweepMarkerThreshold, c.ActivityStartToClose))
+	}
 }

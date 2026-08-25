@@ -173,8 +173,15 @@ func (s *Service) ApplyCallback(ctx context.Context, id uuid.UUID, outcome servi
 		if applied.Settled() || model.Transition(applied, target) != nil {
 			return service.CallbackResult{}, s.conflict(ctx, id, applied, target, outcome, "booking moved beyond this outcome")
 		}
-		if _, err = s.repo.Apply(ctx, id, s.callbackTransition(applied, target, reference, reason, outcome, requestID)); err != nil {
+		_, err = s.repo.Apply(ctx, id, s.callbackTransition(applied, target, reference, reason, outcome, requestID))
+		switch {
+		case errors.Is(err, constant.ErrTransitionConflict):
 			return service.CallbackResult{}, s.conflict(ctx, id, applied, target, outcome, "lost the settle race twice")
+		case err != nil:
+			// Not a conflict: a transient failure. Surfacing it as 409 would
+			// tell the supplier to stop redelivering a confirmation we just
+			// failed to write.
+			return service.CallbackResult{}, err
 		}
 	} else if err != nil {
 		return service.CallbackResult{}, err
@@ -231,7 +238,7 @@ func (s *Service) reportDuplicateSuspect(ctx context.Context, b *model.Booking) 
 // context is detached: a disconnecting distributor already has its booking, and
 // cancelling the start on its behalf only delays confirmation.
 func (s *Service) startWorkflow(ctx context.Context, b *model.Booking) {
-	if err := s.orch.StartBooking(context.WithoutCancel(ctx), b.ID); err != nil {
+	if _, err := s.orch.StartBooking(context.WithoutCancel(ctx), b.ID); err != nil {
 		s.log.ErrorContext(ctx, "could not start booking workflow",
 			"event", "booking.workflow_start_failed", "booking_id", b.ID, "error", err)
 	}

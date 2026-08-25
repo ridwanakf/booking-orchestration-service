@@ -1,6 +1,9 @@
 package constant
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 var (
 	ErrBookingNotFound           = errors.New("booking not found")
@@ -32,8 +35,9 @@ const (
 // Passed as workflow input, not read from process configuration, so a replay
 // reproduces the schedule recorded in history after a config change.
 type WorkflowParams struct {
-	CreateAttempts     int   `json:"createAttempts"`
-	RetrieveDelaysSec  []int `json:"retrieveDelaysSec"`
-	ParkTimeoutSec     int   `json:"parkTimeoutSec"`
-	ActivityTimeoutSec int   `json:"activityTimeoutSec"`
+	CreateAttempts  int             `json:"createAttempts"`
+	RetryDelays     []time.Duration `json:"retryDelays"`
+	ParkTimeout     time.Duration   `json:"parkTimeout"`
+	ActivityTimeout time.Duration   `json:"activityTimeout"`
+	PersistWindow   time.Duration   `json:"persistWindow"`
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 	"github.com/ridwanakf/booking-orchestration-service/internal/orchestrator"
 	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
 )
@@ -55,12 +56,19 @@ func (s *Sweeper) pass(ctx context.Context) {
 	}
 
 	for _, id := range stale {
-		if err := s.starter.StartBooking(ctx, id); err != nil {
+		started, err := s.starter.StartBooking(ctx, id)
+		switch {
+		case err != nil:
 			s.log.ErrorContext(ctx, "sweep could not restart a booking",
-				"event", "sweep.restarted", "booking_id", id, "error", err)
-			continue
+				"event", "sweep.start_failed", "booking_id", id, "error", err)
+		case started:
+			s.log.InfoContext(ctx, "sweep restarted a booking",
+				"event", model.EventSweepRestarted, "booking_id", id)
+		default:
+			// Already open, and stale anyway, so that run is stuck. Calling it a
+			// restart would make a wedged booking look like recovery.
+			s.log.WarnContext(ctx, "stale booking already has an open execution",
+				"event", "sweep.already_running", "booking_id", id)
 		}
-		s.log.InfoContext(ctx, "sweep restarted a booking",
-			"event", "sweep.restarted", "booking_id", id)
 	}
 }

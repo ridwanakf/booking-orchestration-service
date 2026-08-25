@@ -56,11 +56,12 @@ func (mr *MockOrchestratorMockRecorder) SignalOutcome(ctx, bookingID, status any
 }
 
 // StartBooking mocks base method.
-func (m *MockOrchestrator) StartBooking(ctx context.Context, bookingID uuid.UUID) error {
+func (m *MockOrchestrator) StartBooking(ctx context.Context, bookingID uuid.UUID) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StartBooking", ctx, bookingID)
-	ret0, _ := ret[0].(error)
-	return ret0
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // StartBooking indicates an expected call of StartBooking.

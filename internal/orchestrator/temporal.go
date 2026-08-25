@@ -25,19 +25,19 @@ func NewTemporal(c client.Client, taskQueue string, params constant.WorkflowPara
 // The workflow id is the booking id, which is what makes duplicate starts
 // harmless: every path that can start a booking converges on one execution.
 // An already-started error is therefore success, not failure.
-func (t *Temporal) StartBooking(ctx context.Context, bookingID uuid.UUID) error {
+func (t *Temporal) StartBooking(ctx context.Context, bookingID uuid.UUID) (bool, error) {
 	_, err := t.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        bookingID.String(),
 		TaskQueue: t.taskQueue,
 	}, constant.WorkflowBooking, bookingID.String(), t.params)
 
 	if _, ok := errors.AsType[*serviceerror.WorkflowExecutionAlreadyStarted](err); ok {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("start booking workflow: %w", err)
+		return false, fmt.Errorf("start booking workflow: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // The row transition is primary; this only wakes a parked run early. A booking

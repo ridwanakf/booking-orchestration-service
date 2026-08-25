@@ -14,10 +14,10 @@ type Config struct {
 	RetrieveDelays       []time.Duration
 	ParkTimeout          time.Duration
 	ActivityStartToClose time.Duration
+	PersistWindow        time.Duration
 }
 
-// Outcome is the closed contract between an attempt and the workflow. Every
-// branch below is reachable and every value is handled.
+// Outcome is the closed contract between an attempt and the workflow.
 type Outcome string
 
 const (
@@ -42,8 +42,7 @@ type AttemptResult struct {
 	Reason  string
 }
 
-// BookingWorkflow drives one booking to a settled state or to a parked one. It
-// holds no business state of its own: every decision reads from the row, so a
+// Holds no business state of its own: every decision reads from the row, so a
 // replay, a restart, or a second run all reach the same place.
 func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.WorkflowParams) error {
 	cfg := fromParams(params)
@@ -51,9 +50,16 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 
 	// Persisting and reading are safe to retry; calling the supplier is not.
 	// A retried call is a second create that no attempt counter ever saw.
+	// Bounded by a window rather than a count: a failing persist holds an answer
+	// the supplier already gave, and giving up loses a confirmation that exists.
 	idempotent := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: cfg.ActivityStartToClose,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
+		StartToCloseTimeout:    cfg.ActivityStartToClose,
+		ScheduleToCloseTimeout: cfg.PersistWindow,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval: time.Second,
+			MaximumInterval: 30 * time.Second,
+			MaximumAttempts: 0,
+		},
 	})
 	sending := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: cfg.ActivityStartToClose,
@@ -61,8 +67,7 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 	})
 	ctx = idempotent
 
-	// Entry dispatch. A restarted or swept run must never assume it is the
-	// first: the row already knows whether this booking is finished.
+	// A restarted or swept run must never assume it is the first.
 	var status string
 	if err := workflow.ExecuteActivity(ctx, ActivityDispatch, bookingID).Get(ctx, &status); err != nil {
 		return err
@@ -74,7 +79,7 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 
 	for attempt := 1; attempt <= cfg.CreateAttempts; attempt++ {
 		var answer Answer
-		if err := workflow.ExecuteActivity(sending, ActivityAttempt, bookingID).Get(ctx, &answer); err != nil {
+		if err := workflow.ExecuteActivity(sending, ActivityAttempt, bookingID, cfg.CreateAttempts).Get(ctx, &answer); err != nil {
 			return err
 		}
 
@@ -86,13 +91,20 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 		switch result.Outcome {
 		case OutcomeConfirmed, OutcomeRejected, OutcomeSettled, OutcomeFailed:
 			return nil
+		default:
+			// Closed set, so this is a bug rather than a state. Continuing would
+			// send another create on a value nothing defined.
+			log.Error("unrecognised attempt outcome, exiting rather than retrying", "outcome", result.Outcome)
+			return nil
 		case OutcomeInDoubt, OutcomeBudgetSpent:
 			return park(ctx, cfg, bookingID)
 		case OutcomeExit:
 			return nil
 		case OutcomeAmbiguous, OutcomeNotSent:
 			if attempt < cfg.CreateAttempts {
-				_ = workflow.Sleep(ctx, delay(cfg, attempt))
+				if err := workflow.Sleep(ctx, delay(cfg, attempt)); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -108,6 +120,7 @@ func park(ctx workflow.Context, cfg Config, bookingID string) error {
 	if err := workflow.ExecuteActivity(ctx, ActivityPark, bookingID).Get(ctx, &parked); err != nil {
 		return err
 	}
+	// False means not in doubt: settled, or called unreachable.
 	if !parked {
 		return nil
 	}
@@ -142,15 +155,12 @@ func delay(cfg Config, attempt int) time.Duration {
 }
 
 func fromParams(p constant.WorkflowParams) Config {
-	delays := make([]time.Duration, 0, len(p.RetrieveDelaysSec))
-	for _, sec := range p.RetrieveDelaysSec {
-		delays = append(delays, time.Duration(sec)*time.Second)
-	}
 	return Config{
 		CreateAttempts:       p.CreateAttempts,
-		RetrieveDelays:       delays,
-		ParkTimeout:          time.Duration(p.ParkTimeoutSec) * time.Second,
-		ActivityStartToClose: time.Duration(p.ActivityTimeoutSec) * time.Second,
+		RetrieveDelays:       p.RetryDelays,
+		ParkTimeout:          p.ParkTimeout,
+		ActivityStartToClose: p.ActivityTimeout,
+		PersistWindow:        p.PersistWindow,
 	}
 }
 

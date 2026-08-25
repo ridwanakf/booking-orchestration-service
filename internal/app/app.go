@@ -28,12 +28,11 @@ type App struct {
 	pg       *pgxpool.Pool
 	temporal client.Client
 
-	Booking     *bookingsvc.Service
-	APIKeys     repository.APIKeyRepository
-	Activities  *workflow.Activities
-	WorkflowCfg workflow.Config
-	Sweeper     *sweep.Sweeper
-	Mock        *supplier.Mock
+	Booking    *bookingsvc.Service
+	APIKeys    repository.APIKeyRepository
+	Activities *workflow.Activities
+	Sweeper    *sweep.Sweeper
+	Mock       *supplier.Mock
 }
 
 func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
@@ -53,17 +52,12 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 	}
 
 	repo := bookingrepo.New(pg)
-	wfCfg := workflow.Config{
-		CreateAttempts:       cfg.CreateAttempts,
-		RetrieveDelays:       []time.Duration{cfg.CreateRetryDelay},
-		ParkTimeout:          cfg.ParkTimeout,
-		ActivityStartToClose: cfg.ActivityStartToClose,
-	}
 	orch := orchestrator.NewTemporal(temporal, cfg.TaskQueue, constant.WorkflowParams{
-		CreateAttempts:     cfg.CreateAttempts,
-		RetrieveDelaysSec:  []int{int(cfg.CreateRetryDelay.Seconds())},
-		ParkTimeoutSec:     int(cfg.ParkTimeout.Seconds()),
-		ActivityTimeoutSec: int(cfg.ActivityStartToClose.Seconds()),
+		CreateAttempts:  cfg.CreateAttempts,
+		RetryDelays:     []time.Duration{cfg.CreateRetryDelay},
+		ParkTimeout:     cfg.ParkTimeout,
+		ActivityTimeout: cfg.ActivityStartToClose,
+		PersistWindow:   cfg.PersistWindow,
 	})
 
 	return &App{
@@ -73,8 +67,7 @@ func New(ctx context.Context, cfg config.AppConfig) (*App, error) {
 		Booking:  bookingsvc.New(repo, orch, cfg.SupplierID, slog.Default()),
 		APIKeys:  apikeyrepo.New(pg),
 		Activities: workflow.NewActivities(repo,
-			supplier.NewHTTPClient(cfg.SupplierBaseURL, cfg.SupplierDeadline), wfCfg, slog.Default()),
-		WorkflowCfg: wfCfg,
+			supplier.NewHTTPClient(cfg.SupplierBaseURL, cfg.SupplierDeadline), slog.Default()),
 		Sweeper: sweep.New(repo, orch, cfg.SweepInterval, repository.StaleThresholds{
 			Marker:   cfg.SweepMarkerThreshold,
 			Received: cfg.SweepReceivedThreshold,
