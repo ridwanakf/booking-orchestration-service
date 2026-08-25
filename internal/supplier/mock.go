@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 // Scenarios are selected by a suffix on roomTypeId so a reviewer can drive every
@@ -109,13 +111,13 @@ func (m *Mock) postCallback(bookingID, ref string, delivery int) {
 	resp, err := m.http.Do(req)
 	if err != nil {
 		m.log.Warn("mock supplier could not deliver its callback",
-			"event", "supplier.callback", "booking_id", bookingID, "delivery", delivery, "error", err)
+			"event", model.EventSupplierCallback, "booking_id", bookingID, "delivery", delivery, "error", err)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	m.log.Info("mock supplier delivered a callback",
-		"event", "supplier.callback", "booking_id", bookingID, "delivery", delivery, "status", resp.StatusCode)
+		"event", model.EventSupplierCallback, "booking_id", bookingID, "delivery", delivery, "status", resp.StatusCode)
 }
 
 // One reference per client reference, so a repeat of the same booking always

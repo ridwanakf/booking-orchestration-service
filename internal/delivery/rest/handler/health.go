@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 type Readiness func(ctx context.Context) error
@@ -37,7 +39,7 @@ func (h *Health) Ready(c *gin.Context) {
 		// The driver's error carries the DSN, so it is logged rather than
 		// returned on an unauthenticated endpoint.
 		slog.ErrorContext(c.Request.Context(), "readiness probe failed",
-			"event", "readiness.failed", "error", err)
+			"event", model.EventReadinessFailed, "error", err)
 		respondError(c, http.StatusServiceUnavailable, CodeDependencyUnavailable, "a dependency is unavailable")
 		return
 	}

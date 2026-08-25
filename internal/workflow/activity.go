@@ -235,7 +235,7 @@ func (a *Activities) apply(ctx context.Context, id uuid.UUID, answer Answer) (At
 		return AttemptResult{Outcome: OutcomeBudgetSpent, Reason: "attempt budget exhausted"}, nil
 
 	case supplier.OutcomeConfirmed:
-		return a.settle(ctx, id, answer, model.StatusConfirmed, &answer.Reference, nil, requestID)
+		return a.settle(ctx, id, answer, model.StatusConfirmed, nonEmpty(answer.Reference), nil, requestID)
 	case supplier.OutcomeRejected:
 		return a.settle(ctx, id, answer, model.StatusRejected, nil, &answer.Reason, requestID)
 
@@ -407,4 +407,13 @@ func (a *Activities) readBeforeAuthorizing(ctx context.Context, id uuid.UUID) (*
 		}
 	}
 	return nil, err
+}
+
+// A supplier that confirms without a reference has given us no reference, and
+// an empty string in the column reads like one.
+func nonEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

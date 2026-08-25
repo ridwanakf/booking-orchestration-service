@@ -67,6 +67,10 @@ func (s *SweepSuite) runUntilFirstPass(stale []uuid.UUID, queryErr error) {
 	case <-time.After(2 * time.Second):
 		s.FailNow("the sweep never ran a pass")
 	}
+	// Cancelling here rather than straight after the query: the sweep abandons
+	// a batch whose context is done, so cancelling early would test shutdown
+	// while claiming to test batch semantics.
+	s.waitForStarts(len(stale))
 	cancel()
 
 	select {
@@ -87,6 +91,13 @@ func (s *SweepSuite) recordStarts(failFor uuid.UUID) {
 			}
 			return true, nil
 		}).AnyTimes()
+}
+
+func (s *SweepSuite) waitForStarts(want int) {
+	deadline := time.Now().Add(2 * time.Second)
+	for len(s.startedIDs()) < want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (s *SweepSuite) startedIDs() []uuid.UUID {
@@ -114,6 +125,39 @@ func (s *SweepSuite) TestOneFailedStartDoesNotStopTheBatch() {
 	s.runUntilFirstPass([]uuid.UUID{broken, healthy}, nil)
 
 	s.Contains(s.startedIDs(), healthy, "a failed start must not abandon the rest of the batch")
+}
+
+// A batch whose context is done is abandoned rather than driven to completion.
+// The rows are still stale, so the next pass takes them; pushing on would log
+// one deadline per remaining row and bury the reason the pass ran out of time.
+func (s *SweepSuite) TestADoneContextAbandonsTheRestOfTheBatch() {
+	first, second, third := uuid.New(), uuid.New(), uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.repo.EXPECT().FindStale(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return([]uuid.UUID{first, second, third}, nil).AnyTimes()
+	s.starter.EXPECT().StartBooking(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, id uuid.UUID) (bool, error) {
+			s.mu.Lock()
+			s.started = append(s.started, id)
+			s.mu.Unlock()
+			cancel()
+			return true, nil
+		}).AnyTimes()
+
+	finished := make(chan struct{})
+	go func() { s.sweeper.Run(ctx); close(finished) }()
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		s.FailNow("the sweep did not stop when its context was cancelled")
+	}
+
+	s.Len(s.startedIDs(), 1, "the batch must stop at the first booking after the context is done")
+	s.NotContains(s.startedIDs(), second)
+	s.NotContains(s.startedIDs(), third)
 }
 
 func (s *SweepSuite) TestAQueryFailureIsSurvivable() {

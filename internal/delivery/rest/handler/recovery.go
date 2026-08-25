@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 // gin's own Recovery writes to stderr through the standard log package, so a
@@ -17,7 +19,7 @@ import (
 func Recovery() gin.HandlerFunc {
 	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
 		slog.ErrorContext(c.Request.Context(), "panic recovered",
-			"event", "http.panic",
+			"event", model.EventHTTPPanic,
 			"error", fmt.Sprint(recovered),
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,

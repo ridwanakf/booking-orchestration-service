@@ -7,6 +7,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 type Config struct {
@@ -164,10 +165,8 @@ func fromParams(p constant.WorkflowParams) Config {
 	}
 }
 
+// Delegates rather than listing the statuses again: a second copy of the
+// settled set is a second thing to forget when a status is added.
 func settled(status string) bool {
-	switch status {
-	case "CONFIRMED", "REJECTED", "FAILED", "CANCELLED":
-		return true
-	}
-	return false
+	return model.Status(status).Settled()
 }

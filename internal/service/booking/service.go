@@ -79,7 +79,7 @@ func (s *Service) Create(ctx context.Context, req model.CreateRequest) (*model.B
 	}
 
 	s.log.InfoContext(ctx, "booking created",
-		"event", "booking.created",
+		"event", model.EventCreated,
 		"booking_id", stored.ID,
 		"distributor_id", stored.DistributorID)
 
@@ -240,7 +240,7 @@ func (s *Service) reportDuplicateSuspect(ctx context.Context, b *model.Booking) 
 func (s *Service) startWorkflow(ctx context.Context, b *model.Booking) {
 	if _, err := s.orch.StartBooking(context.WithoutCancel(ctx), b.ID); err != nil {
 		s.log.ErrorContext(ctx, "could not start booking workflow",
-			"event", "booking.workflow_start_failed", "booking_id", b.ID, "error", err)
+			"event", model.EventWorkflowNotStart, "booking_id", b.ID, "error", err)
 	}
 }
 

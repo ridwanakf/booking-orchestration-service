@@ -22,6 +22,13 @@ const (
 	EventCallbackRejected = "callback.rejected"
 	EventParked           = "worker.parked"
 	EventSweepRestarted   = "sweep.restarted"
+	EventSweepFailed      = "sweep.failed"
+	EventWorkflowNotStart = "booking.workflow_start_failed"
+	EventSweepStartFailed = "sweep.start_failed"
+	EventSweepAlreadyOpen = "sweep.already_running"
+	EventWorkerStartFail  = "worker.start_failed"
+	EventReadinessFailed  = "readiness.failed"
+	EventHTTPPanic        = "http.panic"
 )
 
 // Event is one row of a booking's lineage, appended in the same statement as

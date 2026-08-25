@@ -21,6 +21,8 @@ import (
 	"github.com/ridwanakf/booking-orchestration-service/internal/supplier"
 	"github.com/ridwanakf/booking-orchestration-service/internal/sweep"
 	"github.com/ridwanakf/booking-orchestration-service/internal/workflow"
+
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 type App struct {
@@ -119,7 +121,7 @@ func (a *App) RunWorker(ctx context.Context) {
 
 		if err := w.Start(); err != nil {
 			slog.WarnContext(ctx, "workflow worker could not start, retrying",
-				"event", "worker.start_failed", "error", err)
+				"event", model.EventWorkerStartFail, "error", err)
 			select {
 			case <-ctx.Done():
 				return

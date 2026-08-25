@@ -11,6 +11,8 @@ import (
 
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
 	"github.com/ridwanakf/booking-orchestration-service/internal/service"
+
+	"github.com/ridwanakf/booking-orchestration-service/internal/model"
 )
 
 type Callback struct {
@@ -53,7 +55,7 @@ func (h *Callback) Receive(c *gin.Context) {
 	// booking ids exist. Constant-time so it cannot be probed by timing either.
 	if subtle.ConstantTimeCompare([]byte(c.GetHeader("X-Callback-Token")), []byte(h.token)) != 1 {
 		slog.WarnContext(c.Request.Context(), "callback rejected",
-			"event", "callback.rejected", "reason", "invalid_token")
+			"event", model.EventCallbackRejected, "reason", "invalid_token")
 		respondError(c, http.StatusUnauthorized, CodeInvalidToken, "invalid callback token")
 		return
 	}
