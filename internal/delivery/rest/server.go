@@ -22,8 +22,7 @@ func NewEngine(health *handler.Health, booking *handler.Booking, keys repository
 	engine.GET("/healthz", health.Live)
 	engine.GET("/readyz", health.Ready)
 
-	// Health and docs are unauthenticated on purpose; everything a distributor
-	// can reach is behind a credential.
+	// Health and docs stay open; everything a distributor reaches is credentialed.
 	distributor := engine.Group("", middleware.Authenticate(keys))
 	distributor.POST("/bookings", booking.Create)
 	distributor.GET("/bookings/:bookingId", booking.Get)

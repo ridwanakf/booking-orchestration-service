@@ -24,8 +24,9 @@ type AppConfig struct {
 	MockCallbackDelay    time.Duration
 
 	SweepInterval          time.Duration
+	SweepMarkerThreshold   time.Duration
 	SweepReceivedThreshold time.Duration
-	SweepInFlightThreshold time.Duration
+	SweepIdleThreshold     time.Duration
 
 	ShutdownTimeout     time.Duration
 	WorkerRetryInterval time.Duration

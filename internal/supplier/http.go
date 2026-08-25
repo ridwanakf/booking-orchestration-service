@@ -48,10 +48,8 @@ type bookResponse struct {
 }
 
 func NewHTTPClient(baseURL string, deadline time.Duration) *HTTPClient {
-	// Keep-alives are off deliberately. Reusing an idle connection is what lets
-	// net/http replay a request transparently, and a replayed create is a second
-	// booking that no attempt counter ever saw. One connection per attempt also
-	// makes the byte counter below unambiguous.
+	// Keep-alives off: reusing an idle connection is what lets net/http replay a
+	// request, and a replayed create is a booking no counter ever saw.
 	transport := &http.Transport{
 		DialContext:       dialCounting(&net.Dialer{Timeout: 10 * time.Second}),
 		DisableKeepAlives: true,
@@ -84,17 +82,21 @@ func (c *HTTPClient) Book(ctx context.Context, req BookRequest) Result {
 	defer cancel()
 
 	// Counting bytes at the socket is the only honest answer to "could the
-	// supplier have seen this?". The transport's WroteRequest hook fires once
-	// the request is buffered, which is before anything reaches the wire, so
-	// trusting it would withdraw doubt from a booking that was never sent.
-	//
-	// The baseline is taken at GotConn, which fires once the connection is
-	// fully established. Over TLS the handshake writes to the same socket, so
-	// counting from zero would make every https request look sent.
+	// supplier have seen this?". WroteRequest fires when the request is buffered,
+	// before anything reaches the wire, so trusting it would withdraw doubt from
+	// a booking that never left.
 	ctx, written := withWriteCounter(ctx)
+	// GotConn fires once the connection is established, TLS included. Until then
+	// every byte belongs to setup: a failed handshake writes a ClientHello and
+	// nothing else, and calling that "sent" turns a cert expiry into an outage of
+	// bookings parked in doubt.
 	var baseline atomic.Int64
+	var connected atomic.Bool
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { baseline.Store(written.Load()) },
+		GotConn: func(httptrace.GotConnInfo) {
+			baseline.Store(written.Load())
+			connected.Store(true)
+		},
 	})
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/bookings", bytes.NewReader(body))
@@ -108,7 +110,7 @@ func (c *HTTPClient) Book(ctx context.Context, req BookRequest) Result {
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		if written.Load() == baseline.Load() {
+		if !connected.Load() || written.Load() == baseline.Load() {
 			return Result{Outcome: OutcomeNotSent, Reason: err.Error(), Latency: time.Since(started)}
 		}
 		return Result{Outcome: OutcomeAmbiguous, Reason: err.Error(), Latency: time.Since(started)}
@@ -123,9 +125,8 @@ func (c *HTTPClient) Book(ctx context.Context, req BookRequest) Result {
 	return c.classify(resp.StatusCode, raw, time.Since(started))
 }
 
-// Decline classification runs before status-class classification, so a
-// recognized decline inside a 5xx is a rejection rather than an ambiguity, and
-// an unrecognized code inside a 200 is an ambiguity rather than a confirmation.
+// Decline classification runs first, so a recognized decline inside a 5xx is a
+// rejection and an unrecognized code inside a 200 is an ambiguity.
 func (c *HTTPClient) classify(status int, raw []byte, latency time.Duration) Result {
 	var parsed bookResponse
 	_ = json.Unmarshal(raw, &parsed)

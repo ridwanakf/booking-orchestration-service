@@ -15,6 +15,7 @@ require (
 	go.temporal.io/api v1.38.0
 	go.temporal.io/sdk v1.29.1
 	go.uber.org/mock v0.6.0
+	golang.org/x/crypto v0.55.0
 )
 
 require (
@@ -65,7 +66,6 @@ require (
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20240325151524-a685a6edb6d8 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect

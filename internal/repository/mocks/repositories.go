@@ -20,6 +20,45 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
+// MockAPIKeyRepository is a mock of APIKeyRepository interface.
+type MockAPIKeyRepository struct {
+	ctrl     *gomock.Controller
+	recorder *MockAPIKeyRepositoryMockRecorder
+	isgomock struct{}
+}
+
+// MockAPIKeyRepositoryMockRecorder is the mock recorder for MockAPIKeyRepository.
+type MockAPIKeyRepositoryMockRecorder struct {
+	mock *MockAPIKeyRepository
+}
+
+// NewMockAPIKeyRepository creates a new mock instance.
+func NewMockAPIKeyRepository(ctrl *gomock.Controller) *MockAPIKeyRepository {
+	mock := &MockAPIKeyRepository{ctrl: ctrl}
+	mock.recorder = &MockAPIKeyRepositoryMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockAPIKeyRepository) EXPECT() *MockAPIKeyRepositoryMockRecorder {
+	return m.recorder
+}
+
+// FindActive mocks base method.
+func (m *MockAPIKeyRepository) FindActive(ctx context.Context, keyID string) (*model.APIKey, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FindActive", ctx, keyID)
+	ret0, _ := ret[0].(*model.APIKey)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// FindActive indicates an expected call of FindActive.
+func (mr *MockAPIKeyRepositoryMockRecorder) FindActive(ctx, keyID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindActive", reflect.TypeOf((*MockAPIKeyRepository)(nil).FindActive), ctx, keyID)
+}
+
 // MockBookingRepository is a mock of BookingRepository interface.
 type MockBookingRepository struct {
 	ctrl     *gomock.Controller
@@ -74,19 +113,33 @@ func (mr *MockBookingRepositoryMockRecorder) Apply(ctx, id, t any) *gomock.Call 
 }
 
 // Authorize mocks base method.
-func (m *MockBookingRepository) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, supplierKey string, requestID *string) (int, model.Status, error) {
+func (m *MockBookingRepository) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, supplierKey string, requestID *string) (repository.Authorization, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Authorize", ctx, id, maxAttempts, supplierKey, requestID)
-	ret0, _ := ret[0].(int)
-	ret1, _ := ret[1].(model.Status)
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
+	ret0, _ := ret[0].(repository.Authorization)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
 }
 
 // Authorize indicates an expected call of Authorize.
 func (mr *MockBookingRepositoryMockRecorder) Authorize(ctx, id, maxAttempts, supplierKey, requestID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Authorize", reflect.TypeOf((*MockBookingRepository)(nil).Authorize), ctx, id, maxAttempts, supplierKey, requestID)
+}
+
+// ClearMarker mocks base method.
+func (m *MockBookingRepository) ClearMarker(ctx context.Context, id uuid.UUID, attempt int, e model.Event) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ClearMarker", ctx, id, attempt, e)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ClearMarker indicates an expected call of ClearMarker.
+func (mr *MockBookingRepositoryMockRecorder) ClearMarker(ctx, id, attempt, e any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ClearMarker", reflect.TypeOf((*MockBookingRepository)(nil).ClearMarker), ctx, id, attempt, e)
 }
 
 // Events mocks base method.
@@ -196,24 +249,24 @@ func (mr *MockBookingRepositoryMockRecorder) InsertOrLoad(ctx, b, requestID any)
 }
 
 // ParkIfUnknown mocks base method.
-func (m *MockBookingRepository) ParkIfUnknown(ctx context.Context, id uuid.UUID) (bool, error) {
+func (m *MockBookingRepository) ParkIfUnknown(ctx context.Context, id uuid.UUID, requestID *string) (bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ParkIfUnknown", ctx, id)
+	ret := m.ctrl.Call(m, "ParkIfUnknown", ctx, id, requestID)
 	ret0, _ := ret[0].(bool)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // ParkIfUnknown indicates an expected call of ParkIfUnknown.
-func (mr *MockBookingRepositoryMockRecorder) ParkIfUnknown(ctx, id any) *gomock.Call {
+func (mr *MockBookingRepositoryMockRecorder) ParkIfUnknown(ctx, id, requestID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ParkIfUnknown", reflect.TypeOf((*MockBookingRepository)(nil).ParkIfUnknown), ctx, id)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ParkIfUnknown", reflect.TypeOf((*MockBookingRepository)(nil).ParkIfUnknown), ctx, id, requestID)
 }
 
 // ResolveStaleMarker mocks base method.
-func (m *MockBookingRepository) ResolveStaleMarker(ctx context.Context, id uuid.UUID) (int, bool, error) {
+func (m *MockBookingRepository) ResolveStaleMarker(ctx context.Context, id uuid.UUID, requestID *string) (int, bool, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ResolveStaleMarker", ctx, id)
+	ret := m.ctrl.Call(m, "ResolveStaleMarker", ctx, id, requestID)
 	ret0, _ := ret[0].(int)
 	ret1, _ := ret[1].(bool)
 	ret2, _ := ret[2].(error)
@@ -221,7 +274,7 @@ func (m *MockBookingRepository) ResolveStaleMarker(ctx context.Context, id uuid.
 }
 
 // ResolveStaleMarker indicates an expected call of ResolveStaleMarker.
-func (mr *MockBookingRepositoryMockRecorder) ResolveStaleMarker(ctx, id any) *gomock.Call {
+func (mr *MockBookingRepositoryMockRecorder) ResolveStaleMarker(ctx, id, requestID any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResolveStaleMarker", reflect.TypeOf((*MockBookingRepository)(nil).ResolveStaleMarker), ctx, id)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResolveStaleMarker", reflect.TypeOf((*MockBookingRepository)(nil).ResolveStaleMarker), ctx, id, requestID)
 }

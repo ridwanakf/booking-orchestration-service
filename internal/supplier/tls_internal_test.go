@@ -66,6 +66,24 @@ func (s *TLSSuite) TestHandshakeBytesAreNotCountedAsTheRequest() {
 // NOT_SENT, and that is correct: the request bytes were written to the socket,
 // so we cannot prove the supplier did not receive them. This pins the boundary,
 // because the tempting mistake is to treat any failed request as not-sent.
+// A certificate the client will not accept: the handshake writes a ClientHello
+// and then fails, so bytes reached the socket but the request never did. This
+// must be NOT_SENT. Reading the raw counter alone reports AMBIGUOUS, which
+// turns a cert expiry or CA rotation into an outage of bookings parked in
+// permanent doubt when every one of them could have been retried cleanly.
+func (s *TLSSuite) TestAFailedHandshakeIsProvablyNotSent() {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"CONFIRMED","reference":"SUP-1"}`))
+	}))
+	defer srv.Close()
+
+	// No RootCAs installed, so verification fails after the ClientHello.
+	got := NewHTTPClient(srv.URL, 2*time.Second).Book(context.Background(), s.req)
+
+	s.Equal(OutcomeNotSent, got.Outcome,
+		"the handshake wrote to the socket; the request did not")
+}
+
 func (s *TLSSuite) TestHandshakeThenHangUpIsAmbiguousBecauseBytesLeft() {
 	cert, err := tls.X509KeyPair(testCertPEM, testKeyPEM)
 	s.Require().NoError(err)

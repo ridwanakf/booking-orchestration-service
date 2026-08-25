@@ -115,18 +115,23 @@ func (r *Repo) FindPriorByFingerprint(ctx context.Context, distributorID, finger
 // restarted long before the age-only thresholds would notice. Parked rows are
 // skipped because they are outcome recovery's, not the sweep's.
 func (r *Repo) FindStale(ctx context.Context, t repository.StaleThresholds, limit int) ([]uuid.UUID, error) {
+	if err := t.Validate(); err != nil {
+		return nil, err
+	}
+
 	rows, err := r.db.Query(ctx, `
 		SELECT id FROM bookings
 		WHERE status IN ('RECEIVED', 'PENDING', 'UNKNOWN')
 		  AND NOT (needs_recovery AND status = 'UNKNOWN')
 		  AND (
-		        (in_flight_attempt IS NOT NULL AND updated_at < now() - $1::interval)
-		     OR (status = 'RECEIVED'           AND updated_at < now() - $2::interval)
-		     OR (in_flight_attempt IS NULL     AND updated_at < now() - $3::interval)
+		        (in_flight_attempt IS NOT NULL AND updated_at < now() - ($1::bigint * interval '1 millisecond'))
+		     OR (status = 'RECEIVED'           AND updated_at < now() - ($2::bigint * interval '1 millisecond'))
+		     OR (status <> 'RECEIVED' AND in_flight_attempt IS NULL
+		                                   AND updated_at < now() - ($3::bigint * interval '1 millisecond'))
 		      )
 		ORDER BY updated_at
 		LIMIT $4`,
-		t.Marker.String(), t.Received.String(), t.InFlight.String(), limit)
+		t.Marker.Milliseconds(), t.Received.Milliseconds(), t.Idle.Milliseconds(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("find stale bookings: %w", err)
 	}

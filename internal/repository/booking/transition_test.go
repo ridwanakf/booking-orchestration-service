@@ -26,6 +26,7 @@ func outcome(applied, current *model.Status) row {
 	return row{scan: func(dest ...any) error {
 		*(dest[0].(**model.Status)) = applied
 		*(dest[1].(**model.Status)) = current
+		*(dest[2].(**int)) = nil
 		return nil
 	}}
 }
@@ -106,6 +107,17 @@ func (s *TransitionSuite) TestAMissingRowIsNotAConflict() {
 
 // An owned marker without an attempt number is a programming error, and it must
 // not silently degrade into a write that guards on nothing.
+// The zero value of MarkerRule is deliberately invalid, so a literal that
+// forgets to state its rule fails loudly rather than taking whichever guard
+// happened to sit at zero.
+func (s *TransitionSuite) TestAMarkerRuleMustBeStated() {
+	_, err := s.repo.Apply(s.ctx, s.id, repository.Transition{
+		From: model.StatusPending, To: model.StatusConfirmed, EventType: model.EventTransition,
+	})
+
+	s.ErrorIs(err, constant.ErrInvalidTransition)
+}
+
 func (s *TransitionSuite) TestAnOwnedMarkerRequiresAnAttemptNumber() {
 	t := s.transition(model.StatusPending, model.StatusConfirmed)
 	t.Marker = repository.MarkerOwned
@@ -121,14 +133,16 @@ func (s *TransitionSuite) TestAuthorizeReturnsTheAttemptItClaimed() {
 			attempt := 1
 			*(dest[0].(**int)) = &attempt
 			*(dest[1].(**model.Status)) = status(model.StatusReceived)
+			*(dest[2].(**int)) = nil
+			*(dest[3].(**int)) = nil
 			return nil
 		}})
 
-	attempt, previous, err := s.repo.Authorize(s.ctx, s.id, 2, "KEY", nil)
+	got, err := s.repo.Authorize(s.ctx, s.id, 2, "KEY", nil)
 
 	s.Require().NoError(err)
-	s.Equal(1, attempt, "the attempt number is what bounds the retry budget")
-	s.Equal(model.StatusReceived, previous, "the prior status decides whether a pre-send failure may settle FAILED")
+	s.Equal(1, got.Attempt, "the attempt number is what bounds the retry budget")
+	s.Equal(model.StatusReceived, got.Previous, "the prior status decides whether a pre-send failure may settle FAILED")
 }
 
 // An exhausted budget, a settled booking, and an attempt already outstanding
@@ -138,46 +152,55 @@ func (s *TransitionSuite) TestAuthorizeRefusesWhenTheGuardDoesNotHold() {
 		Return(row{scan: func(dest ...any) error {
 			*(dest[0].(**int)) = nil
 			*(dest[1].(**model.Status)) = status(model.StatusConfirmed)
+			*(dest[2].(**int)) = nil
+			attempts := 2
+			*(dest[3].(**int)) = &attempts
 			return nil
 		}})
 
-	_, previous, err := s.repo.Authorize(s.ctx, s.id, 2, "KEY", nil)
+	got, err := s.repo.Authorize(s.ctx, s.id, 2, "KEY", nil)
 
 	s.ErrorIs(err, constant.ErrTransitionConflict)
-	s.Equal(model.StatusConfirmed, previous)
+	s.Equal(model.StatusConfirmed, got.Previous)
+	s.Equal(repository.RefusalSettled, got.Refusal,
+		"a settled booking and a spent budget need opposite handling, so they must not collapse")
 }
 
 func (s *TransitionSuite) TestResolveStaleMarker() {
 	s.Run("a marker was outstanding", func() {
-		s.db.EXPECT().QueryRow(gomock.Any(), gomock.Any(), s.id, gomock.Any()).
+		s.db.EXPECT().QueryRow(gomock.Any(), gomock.Any(), s.id, gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(row{scan: func(dest ...any) error {
 				stale := 2
 				*(dest[0].(**int)) = &stale
 				return nil
 			}})
 
-		attempt, resolved, err := s.repo.ResolveStaleMarker(s.ctx, s.id)
+		attempt, resolved, err := s.repo.ResolveStaleMarker(s.ctx, s.id, nil)
 		s.Require().NoError(err)
 		s.True(resolved)
 		s.Equal(2, attempt)
 	})
 
 	s.Run("nothing outstanding", func() {
-		s.db.EXPECT().QueryRow(gomock.Any(), gomock.Any(), s.id, gomock.Any()).
+		s.db.EXPECT().QueryRow(gomock.Any(), gomock.Any(), s.id, gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(row{scan: func(dest ...any) error {
 				*(dest[0].(**int)) = nil
 				return nil
 			}})
 
-		_, resolved, err := s.repo.ResolveStaleMarker(s.ctx, s.id)
+		_, resolved, err := s.repo.ResolveStaleMarker(s.ctx, s.id, nil)
 		s.Require().NoError(err)
 		s.False(resolved)
 	})
 }
 
-func (s *TransitionSuite) TestFlagOnAMissingRow() {
+// Already flagged is the correct outcome, so a zero-row flag is only an error
+// when the booking does not exist.
+func (s *TransitionSuite) TestFlagIsIdempotent() {
 	s.db.EXPECT().Exec(gomock.Any(), gomock.Any(), s.id).
 		Return(pgconn.NewCommandTag("UPDATE 0"), nil)
+	s.db.EXPECT().QueryRow(gomock.Any(), gomock.Any(), s.id).
+		Return(row{scan: func(dest ...any) error { *(dest[0].(*bool)) = true; return nil }})
 
-	s.ErrorIs(s.repo.Flag(s.ctx, s.id), constant.ErrBookingNotFound)
+	s.NoError(s.repo.Flag(s.ctx, s.id))
 }

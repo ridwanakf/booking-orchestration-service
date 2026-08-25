@@ -21,8 +21,9 @@ const (
 	keyMockCallbackDelay = "MOCK_CALLBACK_DELAY"
 
 	keySweepInterval          = "SWEEP_INTERVAL"
+	keySweepMarkerThreshold   = "SWEEP_MARKER_THRESHOLD"
 	keySweepReceivedThreshold = "SWEEP_RECEIVED_THRESHOLD"
-	keySweepInFlightThreshold = "SWEEP_INFLIGHT_THRESHOLD"
+	keySweepIdleThreshold     = "SWEEP_IDLE_THRESHOLD"
 
 	keyShutdownTimeout     = "SHUTDOWN_TIMEOUT"
 	keyWorkerRetryInterval = "WORKER_RETRY_INTERVAL"

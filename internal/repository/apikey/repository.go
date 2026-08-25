@@ -1,7 +1,5 @@
 package apikey
 
-//go:generate mockgen -destination=mocks/repository.go -source=repository.go -package=mocks
-
 import (
 	"context"
 	"errors"

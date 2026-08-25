@@ -75,6 +75,7 @@ func (s *ServiceSuite) TestACallbackRetriesOnceAgainstTheStatusThatWon() {
 
 func (s *ServiceSuite) TestACallbackContradictingASettledOutcomeIsRefusedAndFlagged() {
 	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusConfirmed, ptr("MOCK-1")), nil)
+	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).Return(nil)
 	s.repo.EXPECT().Flag(gomock.Any(), s.id).Return(nil)
 
 	_, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Reference: "MOCK-1", Status: "REJECTED"})
@@ -86,6 +87,13 @@ func (s *ServiceSuite) TestACallbackContradictingASettledOutcomeIsRefusedAndFlag
 // is the most expensive thing that can happen, so it never applies quietly.
 func (s *ServiceSuite) TestASecondReferenceForTheSameStateIsAConflict() {
 	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusConfirmed, ptr("MOCK-1")), nil)
+	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).
+		DoAndReturn(func(_ context.Context, _ uuid.UUID, e model.Event) error {
+			s.Require().NotNil(e.PayloadDigest)
+			s.Equal("MOCK-2-OTHER", *e.PayloadDigest,
+				"the reservation number the supplier named must survive the refusal")
+			return nil
+		})
 	s.repo.EXPECT().Flag(gomock.Any(), s.id).Return(nil)
 
 	_, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Reference: "MOCK-2-OTHER", Status: "CONFIRMED"})
@@ -110,6 +118,7 @@ func (s *ServiceSuite) TestACallbackWhileStillReceivedIsRefusedWithoutFlagging()
 // used to flag arbitrary bookings.
 func (s *ServiceSuite) TestAStatusOutsideTheVocabularyIsFlaggedAgainstARealBooking() {
 	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusPending, nil), nil)
+	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).Return(nil)
 	s.repo.EXPECT().Flag(gomock.Any(), s.id).Return(nil)
 
 	_, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Reference: "MOCK-1", Status: "ON_REQUEST"})
@@ -136,4 +145,28 @@ func (s *ServiceSuite) TestASignalFailureDoesNotFailTheCallback() {
 
 	s.Require().NoError(err)
 	s.True(got.Applied)
+}
+
+// A confirmation with no reservation number is not usable truth: the reference
+// is the handle recovery needs, and settling without it leaves a booking that
+// no query can surface and no compensation can address.
+func (s *ServiceSuite) TestAConfirmationWithoutAReferenceIsRefused() {
+	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusPending, nil), nil)
+	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).Return(nil)
+
+	_, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Status: "CONFIRMED"})
+
+	s.ErrorIs(err, constant.ErrMissingSupplierReference)
+}
+
+// A stored reference of nil does not match everything: a callback naming a
+// reservation we do not have is new information, not a redelivery.
+func (s *ServiceSuite) TestAReferenceArrivingLaterIsNotTreatedAsADuplicate() {
+	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusConfirmed, nil), nil)
+	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).Return(nil)
+	s.repo.EXPECT().Flag(gomock.Any(), s.id).Return(nil)
+
+	_, err := s.svc.ApplyCallback(s.ctx, s.id, s.confirm())
+
+	s.ErrorIs(err, constant.ErrCallbackConflict, "the new reference must not be silently discarded")
 }

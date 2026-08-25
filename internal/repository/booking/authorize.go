@@ -10,13 +10,13 @@ import (
 
 	"github.com/ridwanakf/booking-orchestration-service/internal/constant"
 	"github.com/ridwanakf/booking-orchestration-service/internal/model"
+	"github.com/ridwanakf/booking-orchestration-service/internal/repository"
 )
 
 // ResolveStaleMarker turns an attempt that was never completed into the doubt it
-// represents. Reading the marker and clearing it happen inside one locked
-// statement, so observing and acting are simultaneous and two recoverers racing
-// the same stale marker cannot both act on it. Reports the attempt it resolved.
-func (r *Repo) ResolveStaleMarker(ctx context.Context, id uuid.UUID) (int, bool, error) {
+// represents. Observing and clearing happen in one locked statement, so two
+// recoverers racing the same stale marker cannot both act on it.
+func (r *Repo) ResolveStaleMarker(ctx context.Context, id uuid.UUID, requestID *string) (int, bool, error) {
 	var stale *int
 	err := r.db.QueryRow(ctx, `
 		WITH locked AS (
@@ -28,12 +28,12 @@ func (r *Repo) ResolveStaleMarker(ctx context.Context, id uuid.UUID) (int, bool,
 			WHERE b.id = l.id AND l.in_flight_attempt IS NOT NULL AND l.status IN ('PENDING', 'UNKNOWN')
 			RETURNING b.id, l.status AS was, l.in_flight_attempt AS stale
 		), logged AS (
-			INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, supplier_reason)
-			SELECT id, was, 'UNKNOWN', $2, stale, 'attempt abandoned without an outcome' FROM resolved
+			INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, request_id, supplier_reason)
+			SELECT id, was, 'UNKNOWN', $2, stale, $3, $4 FROM resolved
 			RETURNING booking_id
 		)
 		SELECT (SELECT stale FROM resolved)`,
-		id, model.EventSupplierTimeout).Scan(&stale)
+		id, model.EventSupplierTimeout, requestID, constant.ReasonAttemptAbandoned).Scan(&stale)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, fmt.Errorf("resolve stale marker: %w", err)
 	}
@@ -43,15 +43,12 @@ func (r *Repo) ResolveStaleMarker(ctx context.Context, id uuid.UUID) (int, bool,
 	return *stale, true, nil
 }
 
-// Authorize is the write that must precede every supplier call. It counts the
-// attempt and records that a call is outstanding, in one statement, before any
-// bytes leave. Status moves only on the first attempt, out of RECEIVED, so a
-// healthy booking is never written as in doubt.
-//
-// The caller resolves any stale marker first; the IS NULL guard here is what
-// stops two attempts running at once.
-func (r *Repo) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, supplierKey string, requestID *string) (int, model.Status, error) {
-	var attempt *int
+// Authorize precedes every supplier call: it counts the attempt and records that
+// one is outstanding, before any bytes leave. Status moves only on the first
+// attempt, so a healthy booking is never written as in doubt. The IS NULL guard
+// is what stops two attempts running at once.
+func (r *Repo) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, supplierKey string, requestID *string) (repository.Authorization, error) {
+	var attempt, marker, attemptsSoFar *int
 	var previous *model.Status
 	err := r.db.QueryRow(ctx, `
 		WITH locked AS (
@@ -76,40 +73,54 @@ func (r *Repo) Authorize(ctx context.Context, id uuid.UUID, maxAttempts int, sup
 			SELECT id, was, now_status, $4, supplier_attempts, $5 FROM moved
 			RETURNING booking_id
 		)
-		SELECT (SELECT supplier_attempts FROM moved), (SELECT status FROM locked)`,
-		id, maxAttempts, supplierKey, model.EventSupplierRequest, requestID).Scan(&attempt, &previous)
+		SELECT (SELECT supplier_attempts FROM moved), (SELECT status FROM locked),
+		       (SELECT in_flight_attempt FROM locked), (SELECT supplier_attempts FROM locked)`,
+		id, maxAttempts, supplierKey, model.EventSupplierRequest, requestID).Scan(&attempt, &previous, &marker, &attemptsSoFar)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return 0, "", fmt.Errorf("authorize attempt: %w", err)
+		return repository.Authorization{}, fmt.Errorf("authorize attempt: %w", err)
 	}
 	if previous == nil {
-		return 0, "", constant.ErrBookingNotFound
+		return repository.Authorization{}, constant.ErrBookingNotFound
 	}
 	if attempt != nil {
-		return *attempt, *previous, nil
+		return repository.Authorization{Attempt: *attempt, Previous: *previous}, nil
 	}
-	return 0, *previous, fmt.Errorf("%w: status %s", constant.ErrTransitionConflict, *previous)
+
+	// Three refusals look identical from the row alone, and they need opposite
+	// handling: an outstanding attempt means another worker is mid-call, and
+	// treating that as a spent budget would settle the booking FAILED while a
+	// request is live at the supplier.
+	out := repository.Authorization{Previous: *previous, Refusal: repository.RefusalBudgetSpent}
+	switch {
+	case previous.Settled():
+		out.Refusal = repository.RefusalSettled
+	case marker != nil:
+		out.Refusal = repository.RefusalAttemptOutstanding
+	case attemptsSoFar != nil && *attemptsSoFar < maxAttempts:
+		out.Refusal = repository.RefusalSettled
+	}
+	return out, fmt.Errorf("%w: status %s", constant.ErrTransitionConflict, *previous)
 }
 
-// ParkIfUnknown flags a booking for outcome recovery only while it is still in
-// doubt and nothing is outstanding, so a booking that settles or starts another
-// attempt in the gap is never flagged. Reports whether it parked.
-func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID) (bool, error) {
+// ParkIfUnknown flags for recovery only while the booking is in doubt with
+// nothing outstanding, so one that settles in the gap is never flagged.
+func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID, requestID *string) (bool, error) {
 	var parked *bool
 	err := r.db.QueryRow(ctx, `
 		WITH locked AS (
-			SELECT id, status, in_flight_attempt FROM bookings WHERE id = $1 FOR UPDATE
+			SELECT id, status, in_flight_attempt, needs_recovery FROM bookings WHERE id = $1 FOR UPDATE
 		), parked AS (
 			UPDATE bookings b
 			SET needs_recovery = TRUE, version = b.version + 1, updated_at = now()
 			FROM locked l
-			WHERE b.id = l.id AND l.status = 'UNKNOWN' AND l.in_flight_attempt IS NULL
+			WHERE b.id = l.id AND l.status = 'UNKNOWN' AND l.in_flight_attempt IS NULL AND NOT l.needs_recovery
 			RETURNING b.id, b.supplier_attempts
 		), logged AS (
-			INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt)
-			SELECT id, 'UNKNOWN', 'UNKNOWN', $2, supplier_attempts FROM parked
+			INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, request_id)
+			SELECT id, 'UNKNOWN', 'UNKNOWN', $2, supplier_attempts, $3 FROM parked
 			RETURNING booking_id
 		)
-		SELECT (SELECT TRUE FROM parked)`, id, model.EventParked).Scan(&parked)
+		SELECT (SELECT TRUE FROM parked)`, id, model.EventParked, requestID).Scan(&parked)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("park booking: %w", err)
 	}
@@ -119,13 +130,29 @@ func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID) (bool, error) {
 // Flag marks a booking for outcome recovery without moving it. Deliberately
 // unguarded on status: a booking already flagged staying flagged is correct.
 func (r *Repo) Flag(ctx context.Context, id uuid.UUID) error {
+	// updated_at is left alone on purpose: it is the sweep's only staleness clock,
+	// and a supplier redelivering a refused callback would otherwise push it
+	// forward forever. Setting it to itself opts out of the trigger.
 	tag, err := r.db.Exec(ctx,
-		`UPDATE bookings SET needs_recovery = TRUE, version = version + 1, updated_at = now() WHERE id = $1`, id)
+		`UPDATE bookings SET needs_recovery = TRUE, version = version + 1, updated_at = updated_at
+		 WHERE id = $1 AND NOT needs_recovery`, id)
 	if err != nil {
 		return fmt.Errorf("flag booking: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return constant.ErrBookingNotFound
+		// Already flagged is the correct outcome, so only a missing row is an error.
+		return r.mustExist(ctx, id)
+	}
+	return nil
+}
+
+func (r *Repo) mustExist(ctx context.Context, id uuid.UUID) error {
+	var exists bool
+	if err := r.db.QueryRow(ctx, `SELECT TRUE FROM bookings WHERE id = $1`, id).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return constant.ErrBookingNotFound
+		}
+		return fmt.Errorf("confirm booking exists: %w", err)
 	}
 	return nil
 }

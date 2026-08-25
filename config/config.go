@@ -48,7 +48,7 @@ func Load() (AppConfig, error) {
 
 			SweepInterval:          l.dur(keySweepInterval, 15*time.Second),
 			SweepReceivedThreshold: l.dur(keySweepReceivedThreshold, 30*time.Second),
-			SweepInFlightThreshold: l.dur(keySweepInFlightThreshold, 15*time.Minute),
+			SweepIdleThreshold:     l.dur(keySweepIdleThreshold, 15*time.Minute),
 
 			WorkerRetryInterval: l.dur(keyWorkerRetryInterval, 5*time.Second),
 
@@ -62,6 +62,10 @@ func Load() (AppConfig, error) {
 		// A backstop for a client deadline that fails to fire, so it must
 		// outlast the supplier call rather than pre-empt it.
 		loaded.ActivityStartToClose = loaded.SupplierDeadline + 15*time.Second
+
+		// A marker older than one deadline plus its backstop cannot have a live
+		// call behind it, so it is derived rather than set independently.
+		loaded.SweepMarkerThreshold = l.dur(keySweepMarkerThreshold, loaded.ActivityStartToClose+15*time.Second)
 
 		loadErr = errors.Join(l.errs...)
 	})
