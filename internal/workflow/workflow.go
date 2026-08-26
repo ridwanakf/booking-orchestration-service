@@ -12,7 +12,7 @@ import (
 
 type Config struct {
 	CreateAttempts       int
-	RetrieveDelays       []time.Duration
+	RetryDelays          []time.Duration
 	ParkTimeout          time.Duration
 	ActivityStartToClose time.Duration
 	PersistWindow        time.Duration
@@ -146,19 +146,19 @@ func park(ctx workflow.Context, cfg Config, bookingID string) error {
 // Deterministic on purpose: the tests assert exact schedules, and jitter buys
 // nothing at one workflow per booking.
 func delay(cfg Config, attempt int) time.Duration {
-	if len(cfg.RetrieveDelays) == 0 {
+	if len(cfg.RetryDelays) == 0 {
 		return 30 * time.Second
 	}
-	if attempt-1 < len(cfg.RetrieveDelays) {
-		return cfg.RetrieveDelays[attempt-1]
+	if attempt-1 < len(cfg.RetryDelays) {
+		return cfg.RetryDelays[attempt-1]
 	}
-	return cfg.RetrieveDelays[len(cfg.RetrieveDelays)-1]
+	return cfg.RetryDelays[len(cfg.RetryDelays)-1]
 }
 
 func fromParams(p constant.WorkflowParams) Config {
 	return Config{
 		CreateAttempts:       p.CreateAttempts,
-		RetrieveDelays:       p.RetryDelays,
+		RetryDelays:          p.RetryDelays,
 		ParkTimeout:          p.ParkTimeout,
 		ActivityStartToClose: p.ActivityTimeout,
 		PersistWindow:        p.PersistWindow,
