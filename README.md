@@ -183,10 +183,46 @@ delivery/rest -> service -> repository -> PostgreSQL
 | **gin, pgx, goose, urfave/cli, slog, testify, uber-go/mock** | Boring, current, and each defensible in review. |
 | **The mock supplier in-process** | Every scenario is reproducible from one clone with no fixtures. It is off by default and the compose stack opts in, because it answers unauthenticated on the API port. |
 
+## Operations
+
+A booking that exhausts its attempt budget while still in doubt parks with `needs_recovery` set and waits. Until the outcome recovery pass exists, an operator works those rows from this query.
+
+**What needs attention, oldest first:**
+
+```sql
+SELECT id, distributor_id, status, supplier_attempts, in_flight_attempt,
+       supplier_reference, updated_at
+FROM bookings
+WHERE needs_recovery
+ORDER BY updated_at;
+```
+
+**The full story of one booking**, which is what to read before touching anything:
+
+```sql
+SELECT seq, occurred_at, event_type, from_status, to_status, attempt,
+       supplier_status_code, supplier_reason
+FROM booking_events
+WHERE booking_id = '<id>'
+ORDER BY seq;
+```
+
+**Resolving one.** Never `UPDATE bookings SET status = ...` by hand: that skips the lineage append and the two stop agreeing. Establish the truth at the supplier first, then apply it through the same guarded path the service uses, which is the callback endpoint:
+
+```bash
+curl -X POST localhost:8080/supplier/callbacks \
+  -H 'Content-Type: application/json' -H "X-Callback-Token: $CALLBACK_TOKEN" \
+  -d '{"bookingId": "<id>", "supplierReference": "<their ref>", "supplierStatus": "CONFIRMED"}'
+```
+
+That clears the recovery flag, appends the event, and resolves the booking exactly as a late supplier callback would.
+
+**Health signals worth a dashboard:** the age of the oldest row with `needs_recovery`, the count of `UNKNOWN` by age bucket, and the task queue's schedule-to-start latency. The last one is the leading indicator of a saturated worker fleet, and it moves long before CPU does.
+
 ## Production design notes
 
 **A supplier request times out. What do we return, and what happens next?**
-`UNKNOWN`, never a rejection. A timeout after the request left is not evidence of anything, and telling a distributor "failed" invites a rebooking of a room the supplier may already hold. The booking retries on a bounded budget, and because a book endpoint is metered, recovery is retrieve-driven rather than a second create. If the budget runs out while doubt remains, the booking parks with `needs_recovery` set and waits for a callback or an operator, rather than being closed with a guess.
+`UNKNOWN`, never a rejection. A timeout after the request left is not evidence of anything, and telling a distributor "failed" invites a rebooking of a room the supplier may already hold. The booking retries on a bounded budget, capped at two creates because a book endpoint is contractually metered. Be precise about what that second attempt is: **it is a blind create, not a retrieve.** That is safe here only because the mock deduplicates on the reference we send. Against a real supplier that merely echoes it, retrieve-before-retry is the correct strategy, which is why outcome recovery is the first roadmap item rather than a refinement. If the budget runs out while doubt remains, the booking parks with `needs_recovery` set and waits for a callback or an operator, rather than being closed with a guess.
 
 **The distributor retries with the same idempotency key.**
 `200` with the booking's current state and `Idempotent-Replayed: true`, never a second booking. Same key with a different payload is `422`: that is a client bug and answering with the original booking would hide it. A request fingerprint, a SHA-256 over the parsed fields with the key excluded, is what distinguishes the two.
@@ -195,7 +231,7 @@ delivery/rest -> service -> repository -> PostgreSQL
 An authenticated callback applies the outcome through the same guarded transition (`UNKNOWN -> CONFIRMED`), and the row is what the distributor's next `GET` returns. The workflow is signalled so a parked run finishes early, but the row transition is primary: a late callback resolves the booking even if the execution has already closed. A redelivery is a no-op; a callback contradicting a settled state is refused, logged, and flagged for recovery rather than applied.
 
 **How do pending or unknown bookings survive a restart?**
-Nothing lives in memory. Bookings are rows and workflows are durable, so a restart resumes. The gap a restart can open is between a committed row and a started workflow, and a sweep closes it: one query over unflagged, unsettled rows that have gone quiet, restarting them by booking id. Because the workflow id is the booking id, restarting something already running is harmless. Every run also dispatches on the row's current status before acting, so a resumed or swept run never assumes it is the first.
+Nothing lives in memory. Bookings are rows and workflows are durable, so a restart resumes. The gap a restart can open is between a committed row and a started workflow, and a sweep closes it: one query over unsettled rows that have gone quiet, restarting them by booking id. The recovery flag is not a trapdoor: it removes a row from the sweep only while that row is `UNKNOWN`, the parked case it exists for. A flagged `RECEIVED` or `PENDING` row is still swept, because otherwise one refused callback could strand a booking permanently. Because the workflow id is the booking id, restarting something already running is harmless. Every run also dispatches on the row's current status before acting, so a resumed or swept run never assumes it is the first.
 
 **What changes with several instances running concurrently?**
 Nothing in the design, which is the point. Correctness lives in the database constraint, the guarded updates, and workflow-id uniqueness, all of which are already cross-process. The task queue distributes work; two instances racing the same booking produce one winner and one named conflict. There are no in-memory locks to make cluster-safe, and no leader to elect. The sweep is safe to run on every instance because it only asks for a workflow to exist.

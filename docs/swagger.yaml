@@ -40,6 +40,9 @@ definitions:
       updatedAt:
         example: "2026-08-24T10:00:00Z"
         type: string
+      version:
+        example: 3
+        type: integer
     type: object
   handler.CallbackRequest:
     properties:

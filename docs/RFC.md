@@ -190,7 +190,7 @@ LIMIT $4
 The mock supplier, an HTTP service mounted in the same binary so the client exercises a real transport, real deadlines, and real status codes:
 
 - Lives in the same binary behind the supplier-client interface, selected by configuration.
-- Scenario chosen by `roomTypeId` suffix: `-confirm`, `-reject`, `-timeout`, `-unclassified` (a 4xx with no recognized decline code). Any other value, including the plain `room-deluxe` of the examples, confirms.
+- Scenario chosen by `roomTypeId` suffix: `-confirm`, `-reject`, `-timeout`, `-unclassified` (a `200` carrying an error envelope with no recognized decline code, which is the harder case: a success status that must not be read as success). Any other value, including the plain `room-deluxe` of the examples, confirms.
 - Honours the booking id as an idempotency key: repeats get the same answer.
 - The timeout scenario holds the request past the client deadline, then posts an authenticated callback to the configured callback URL after a delay comfortably longer than the deadline, and posts it twice, so duplicate delivery is demonstrable without hand-crafting a request. Its `supplierReference` is minted once per booking and reused on both.
 
@@ -289,7 +289,7 @@ Notes:
 - **`seq` is a global `BIGSERIAL`**, and per-booking ordering is `WHERE booking_id = ? ORDER BY seq`, which a monotonic sequence gives for free. The obvious alternative, `COALESCE(MAX(seq), 0) + 1` scoped to the booking, is **not safe under Read Committed**: a transaction that blocks on the row lock still computes its maximum from its own pre-block snapshot, so two writers racing one booking compute the same value and one dies on the primary key. That is reachable on a designed path, since a supplier redelivering a callback produces exactly that race. A sequence has neither problem, and nothing needs the numbers to be dense.
 - `seq` is deliberately not the `version` column either: a refusal records an event without moving the row, so tying the two would collide the moment a booking is refused twice.
 - `event_type` is a closed vocabulary drawn from the log vocabulary (6.9), so an `event=` filter and a lineage query name the same thing. It is a **subset**: a lineage row needs a booking, so events that occur without one, a callback for an unknown id or a rejected token, are logged only. Transitions use `booking.transition`; creation uses `booking.created`; refusals use `booking.conflict`, `booking.duplicate_request`, `booking.duplicate_suspect`, or `callback.rejected`; attempts use `supplier.request`, `supplier.response`, `supplier.timeout`, `supplier.callback`; recovery uses `worker.parked` and `sweep.restarted`. The column is named `event_type` rather than `trigger` because `trigger` is a reserved word in SQL.
-- `from_status` equals `to_status` on a refusal, which is how a reader distinguishes "the booking moved" from "something was asserted and declined".
+- `from_status` equals `to_status` whenever a row was written without moving: a refusal, but also a marker clear, a park, and a stale-marker resolution that was already in UNKNOWN. So it separates "the booking moved" from "something happened that did not move it", and `event_type` is what names which. An audit of refused supplier truth filters on the refusal event types, not on the equality alone.
 - `payload_digest` is a hex-encoded SHA-256 of the supplier or callback body that caused the event, and is null for events with no external body (an authorization, a park, a sweep restart). `attempt` is null for events outside a supplier attempt. `occurred_at` defaults to `now()`.
 - Creation appends its lineage row with `from_status` null and `event_type = booking.created`, written in the same `INSERT ... ON CONFLICT DO NOTHING` statement that creates the booking. `seq` comes from the sequence like every other row; it is not 1 per booking. A create that loses the race appends nothing, because it changed nothing.
 - `payload_digest` is a SHA-256 of the supplier's response body, never the body. `supplier_reason` carries the decline code or error string, which is bounded and safe. A booking payload contains guest names, so storing responses verbatim would spread personal data into a table whose whole purpose is to be kept.
@@ -312,7 +312,7 @@ Invariants:
 - One row per distributor intent.
 - Status changes only through guarded transitions.
 - Every status change appends exactly one `booking_events` row, in the same statement. There is no path that moves a booking without recording why.
-- Refusals are recorded too. A duplicate callback, a conflict, and a denied transition each append an event with `from_status = to_status` and an `event_type` naming the refusal, because "a supplier told us something and we declined to act on it" is exactly the kind of fact an audit needs and the booking row cannot hold.
+- Refusals are recorded too. A duplicate callback, a conflict, and a denied transition each append an event whose `event_type` names the refusal, because "a supplier told us something and we declined to act on it" is exactly the kind of fact an audit needs and the booking row cannot hold.
 - Terminal states are sticky: a later conflicting signal is logged and flagged, never applied.
 - Every supplier interaction carries the booking id mapped onto the supplier's idempotency key, stored in `supplier_idempotency_key` at the first reservation and reused unchanged by every retry. A supplier whose key format differs stores its own value there; the mapping is a design choice, not an identity.
 - A CONFIRMED booking's supplier reference is immutable; only a real supplier correction mechanism (none exists in v0.1) may change it.
@@ -356,7 +356,9 @@ A marker with no owner is worse than no marker: it can be left set by an abandon
 
 **Rule 1: only the attempt that set the marker may record its outcome.** Every worker-side outcome write is guarded on `in_flight_attempt = <this attempt>` and clears the marker in the same statement. An attempt whose guard fails has been superseded; it records a `booking.conflict` event carrying whatever the supplier told it, and stops. It never writes silently, because an answer arriving for a superseded attempt is evidence of a second reservation, which is the most expensive thing that can happen here.
 
-**Rule 2: authorizing an attempt resolves any marker it finds.** A marker still set when the next attempt is authorized means the previous attempt was abandoned without recording anything, which is the definition of unknown. So authorization is two guarded statements in one activity: resolve a stale marker to `UNKNOWN` and clear it, then authorize. Both are guarded, so the activity is safe to retry, and no marker can outlive the next authorization. This is what stops a marker left by a killed worker from wedging the booking: the guard `in_flight_attempt IS NULL` never blocks forever, because whoever finds it set is obliged to resolve it first.
+**Rule 2: a run resolves any marker it finds before authorizing anything.** A marker still set when a run begins means the previous attempt was abandoned without recording anything, which is the definition of unknown. So every run's entry dispatch resolves a stale marker to `UNKNOWN` and clears it, and only then may an attempt be authorized. Both statements are guarded, so the run is safe to restart. This is what stops a marker left by a killed worker from wedging the booking: the guard `in_flight_attempt IS NULL` never blocks forever, because a fresh run is obliged to resolve it first.
+
+Be precise about the scope: resolution happens at **run entry**, not inside the authorization statement. A marker that appears mid-run, which means another worker is authorizing concurrently, is not resolved by this run; it refuses with `attempt outstanding` and exits, and the sweep's marker threshold brings a fresh run that does resolve it. That is a liveness delay bounded by the threshold, never a wrong outcome, and it is deliberate: a run that resolved a marker it did not set could clear a marker whose call is still live.
 
 **Rule 3: supplier truth arriving out of band supersedes an in-flight attempt.** A callback carries no attempt number, so it guards on status alone and clears the marker unconditionally. It is authoritative: the supplier is telling us what it did, which outranks an attempt still waiting to find out. The superseded attempt then hits Rule 1 and records its conflict rather than overwriting.
 
@@ -406,9 +408,10 @@ Error envelope, all endpoints: `{"status":"error","code":"<machine_code>","messa
 **Create a booking**
 
 ```bash
-curl -X POST :8080/bookings -H 'Content-Type: application/json' -d '{
+curl -X POST :8080/bookings \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer bok_<keyId>_<secret>' -d '{
   "idempotencyKey": "partner-12345",
-  "distributorId": "distributor-001",
   "propertyId": "hotel-001",
   "roomTypeId": "room-deluxe-confirm",
   "checkIn": "2026-09-10",
@@ -525,10 +528,11 @@ Every error shares one envelope, and `code` is the stable, machine-readable fiel
 | 409 | `callback_conflict` | *(callbacks only)* The asserted outcome contradicts a settled booking, or carries a second supplier reference | Do not retry. The discrepancy is flagged for outcome recovery and needs a human |
 | 422 | `idempotency_key_reused` | The key was used before with a **different** payload | Do not retry. Either reuse the original payload or choose a new key. Two different bookings under one key is a client bug, and answering with the first would hide it |
 | 400 | `invalid_request` | *(callbacks too)* An unparseable callback body, checked before anything else | Supplier-side bug; the payload never reached state routing |
+| 400 | `missing_supplier_reference` | A CONFIRMED callback carried no supplier reference. A confirmation we cannot correlate is not usable, and accepting it would record a settled booking with nothing to reconcile against | Resend with the reservation reference |
 | 400 | `unsupported_supplier_status` | *(callbacks only)* A status outside this version's vocabulary | The booking is flagged so the truth is durable. Needs a design change to apply |
 | 429 | `rate_limited` | **Not in v0.1.** Per-distributor quota, once the identity from 6.4 has a policy model behind it | Back off and retry with jitter. `Retry-After` gives the floor |
 | 500 | `internal_error` | A fault on our side | Retry with backoff **using the same idempotency key**. That is exactly what the key is for |
-| 503 | `dependency_unavailable` | The database is unreachable, so the request cannot be answered truthfully. Note that an unreachable **orchestrator** is not this: creates still return `201` and the sweep drains the backlog (6.7 #12) | Retry with backoff. Any booking already created is safe |
+| 503 | `dependency_unavailable` | Emitted by `/readyz` only. A database fault on a request path answers `500 internal_error` in v0.1; mapping it to 503 per request is a small, worthwhile addition and is not built. An unreachable **orchestrator** is neither: creates still return `201` and the sweep drains the backlog (6.7 #12) | Retry with backoff. Any booking already created is safe |
 
 Two of these deserve emphasis because they are the ones distributors get wrong:
 
@@ -752,12 +756,12 @@ Retry parameters, configurable defaults:
 | Activity start-to-close | supplier deadline plus 15s (105s at the default), a backstop for a client deadline that fails to fire. It is derived, never set independently: shorter than the deadline it guards, it pre-empts the call instead of backstopping it. When a client deadline does fail to fire, an abandoned call can still be in flight when the next attempt starts. That is safe here only because the v0.1 supplier deduplicates on the reference we send. Against a supplier without create idempotency, overlapping creates are forbidden: outcome recovery must resolve the earlier attempt before another create is issued (2.1, 8.1) |
 | Retry jitter | none in v0.1, deterministic on purpose so tests are exact; jitter is a fleet-scale addition |
 | Sweep scan interval | 15s |
-| `failure_reason` vocabulary | `supplier_unreachable` (budget spent, every attempt proven not sent), `orchestration_failure` (failure before any attempt), `request_build_failed` (our own pre-send bug). Closed, and each maps to exactly one path |
+| `failure_reason` vocabulary | On FAILED it is ours and closed: `supplier_unreachable` (budget spent, every attempt proven not sent) or `request_build_failed` (our own pre-send bug). On REJECTED it carries the supplier's own decline code, or `supplier_declined` when a callback carried none, because the supplier's reason is more useful than a re-coding of it. So filter on `status`, not on this column alone |
 | Shutdown grace period | supplier deadline plus 15s, derived. A deploy must be able to finish an in-flight supplier call |
 | Workflow start context | detached from the request, so a distributor disconnect cannot cancel a start for a booking already committed |
 | Staleness threshold, RECEIVED | 30s |
 | Staleness threshold, PENDING or UNKNOWN | 15 minutes, comfortably beyond the recovery window so a live booking is never swept |
-| Staleness threshold, marker set | supplier deadline plus the activity backstop (195s at the defaults). A marker older than that cannot have a live call behind it, so the row is restarted early rather than waiting out the 15 minutes |
+| Staleness threshold, marker set | the activity backstop plus the persist window plus a margin (12m at the defaults). The marker is held from authorization until the outcome persists, so a legitimate hold spans one supplier call **and** the whole retry window of the write that records it. Deriving it from the call alone reports healthy bookings as wedged. Still faster than the age-only threshold, which is what it is for |
 | Park timer | 24h fixed in v0.1. Note that parking is a retrieve-only strategy: the rate key from the preceding availability call expires in minutes, so a parked booking cannot be re-created later even where that would be safe, only retrieved or abandoned. In production it should be the sooner of that and the booking's free-cancellation deadline, because past that deadline an unseen duplicate stops being refundable; v0.1 cannot implement it, since the payload deliberately carries no rate plan or cancellation policy (2.1) |
 
 ### 6.8 Callback security
@@ -812,13 +816,13 @@ Structured JSON logs with a fixed event vocabulary; every line carries `request_
 | Invalid state transition | unit: transition-table cases plus the callback conflict `409` |
 | Lost workflow start | sweep test: a stale RECEIVED row gets its workflow started exactly once; a live execution is a no-op |
 | Guarded-update polarity | unit against the database: zero rows with status already at target continues; zero rows with a conflict stops without a supplier call |
-| Unclassifiable supplier answer | workflow test: a 4xx with no decline code goes to UNKNOWN and retries rather than failing |
+| Unclassifiable supplier answer | workflow test: an answer with no recognized decline code, whether a 4xx or a 200 error envelope, goes to UNKNOWN and retries rather than failing |
 | Deploy safety | replay test against histories exported from real executions and committed as fixtures, including a **parked** one mid-execution on a long timer, which is the booking most likely to be alive across a deploy. It pins the workflow type and task queue names, and it is the test that proves workflow parameters are carried in history rather than read from configuration |
 | Attempt exclusion | integration: concurrent authorizations against one booking grant distinct attempt numbers, stop at the budget, and never overlap, because `in_flight_attempt IS NULL` is part of the guard |
 | Marker discipline | integration: a crash with the marker set resolves to UNKNOWN on the next run; an attempt cannot clear a marker its successor set |
 | Lineage completeness | integration: every transition appends exactly one event in the same transaction, and a refused callback still records why |
-| Tenant isolation | integration: a booking created by one distributor answers `404` to another, and a key cannot be claimed across tenants |
-| Constraint enforcement | integration: the database refuses a status outside the state machine and a stay that ends before it starts, and the trigger fills `updated_at` for a statement that never mentions it |
+| Tenant isolation | service test: a booking created by one distributor answers `404` to another, and the credential overwrites any body value before the fingerprint is computed |
+| Constraint enforcement | integration: the database refuses a status outside the state machine, a stay that ends before it starts, and a marker naming an attempt outside the budget |
 
 - Workflow tests run in the SDK's in-memory test environment with time skipping, so backoff schedules execute in milliseconds.
 - Integration tests need the compose stack and sit behind a build tag. They exist because these guarantees live in SQL: row locking, constraint enforcement, and the trigger. A mocked database proves the branch logic and nothing about the statement.
@@ -864,7 +868,7 @@ Section 4 is exactly what v0.1 ships. Everything below is design only.
 
 ## 9. Production design notes
 
-1. **Supplier timeout.** The distributor is answered with the booking's real state, UNKNOWN, never a fabricated rejection. What happens next: bounded retries under the same supplier idempotency key, a late callback, or outcome recovery. The distributor contract is explicit: same key means same booking; do not rebook on timeout. In v0.1, flagged rows are worked from a runbook query (in the README) and resolved through the same guarded transitions; the outcome recovery pass (8.1) automates this.
+1. **Supplier timeout.** The distributor is answered with the booking's real state, UNKNOWN, never a fabricated rejection. What happens next: bounded retries under the same supplier idempotency key, a late callback, or outcome recovery. The distributor contract is explicit: same key means same booking; do not rebook on timeout. In v0.1, flagged rows are worked from the runbook query in the README's operations section and resolved through the same guarded transitions; the outcome recovery pass (8.1) automates this.
 2. **Retried request, same key.** `200` with the original booking's current state, never a second booking. A changed payload is a `422`: a client bug surfaced rather than honoured.
 3. **Late confirmation.** Applied through the guarded `UNKNOWN -> CONFIRMED` transition whenever it arrives; visible on the next `GET` (webhooks in 8.5); redeliveries are acknowledged no-ops.
 4. **Restart.** Bookings are rows. Sagas are durable workflow executions that resume where they stopped, and the sweep covers the start gap. No state lives only in memory.

@@ -33,6 +33,7 @@ type BookingResponse struct {
 	Guest             Guest   `json:"guest"`
 	FailureReason     *string `json:"failureReason,omitempty"`
 	NeedsRecovery     bool    `json:"needsRecovery,omitempty"`
+	Version           int     `json:"version" example:"3"`
 	CreatedAt         string  `json:"createdAt" example:"2026-08-24T10:00:00Z"`
 	UpdatedAt         string  `json:"updatedAt" example:"2026-08-24T10:00:00Z"`
 }
@@ -51,6 +52,7 @@ func toResponse(b *model.Booking) BookingResponse {
 		Guest:             Guest{FirstName: b.GuestFirstName, LastName: b.GuestLastName},
 		FailureReason:     b.FailureReason,
 		NeedsRecovery:     b.NeedsRecovery,
+		Version:           b.Version,
 		CreatedAt:         b.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:         b.UpdatedAt.UTC().Format(time.RFC3339),
 	}
