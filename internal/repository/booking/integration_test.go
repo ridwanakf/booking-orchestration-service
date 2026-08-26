@@ -47,10 +47,20 @@ func (s *IntegrationSuite) SetupSuite() {
 	s.repo = repo.New(pool)
 }
 
+// Fixtures live in the same database the running service owns, so the sweeper
+// will drive anything left behind through real supplier calls. Every booking
+// this suite creates carries the it- prefix precisely so it can be removed.
 func (s *IntegrationSuite) TearDownSuite() {
-	if s.pool != nil {
-		s.pool.Close()
+	if s.pool == nil {
+		return
 	}
+	_, err := s.pool.Exec(s.ctx,
+		`DELETE FROM booking_events WHERE booking_id IN
+		   (SELECT id FROM bookings WHERE distributor_id LIKE 'it-%')`)
+	s.NoError(err)
+	_, err = s.pool.Exec(s.ctx, `DELETE FROM bookings WHERE distributor_id LIKE 'it-%'`)
+	s.NoError(err)
+	s.pool.Close()
 }
 
 // The zero value is deliberately not a marker rule, so a caller that forgets to
@@ -160,7 +170,8 @@ func (s *IntegrationSuite) TestParkingTwiceReportsParkedButRecordsOneEvent() {
 
 	s.True(first)
 	s.True(second, "the caller must arm its recovery window either way")
-	s.Equal(1, s.countEvents(b.ID, model.EventParked), "only the first park is a state change")
+	s.Equal(1, s.countEvents(b.ID, model.EventParked),
+		"the second park still writes the row, but only the first is worth a lineage entry")
 }
 
 func (s *IntegrationSuite) TestLineageSequenceIsUniqueAcrossConcurrentBookings() {
@@ -269,10 +280,10 @@ func (s *IntegrationSuite) TestTheDatabaseRefusesAMarkerOutsideTheBudget() {
 	s.Error(err, "a marker beyond the attempt count must not be storable")
 }
 
-// The recovery flag removes a row from the sweep only when nothing is
-// outstanding, which is the parked case it exists for. A flag landing while an
-// attempt is still in flight, which any refused callback can do, must not
-// remove the row: nothing else would ever resolve that marker.
+// The exclusion is narrow on purpose: flagged, in doubt, and nothing
+// outstanding. A flag landing while an attempt is still in flight, which any
+// refused callback can do, must not remove the row, because nothing else would
+// ever resolve that marker.
 func (s *IntegrationSuite) TestAFlaggedRowWithAnOutstandingAttemptIsStillSwept() {
 	b := s.seed()
 	s.mustApply(b.ID, model.StatusReceived, model.StatusPending)
@@ -309,6 +320,67 @@ func (s *IntegrationSuite) TestAParkedRowIsNotSwept() {
 
 	s.Require().NoError(err)
 	s.NotContains(stale, b.ID, "a parked booking waits for recovery, not for the sweep")
+}
+
+// The mechanism the whole attempt budget rests on. FOR UPDATE plus the
+// IS NULL guard must grant distinct attempt numbers and never let two callers
+// hold a marker at once, which no unit test against a mocked connection can show.
+func (s *IntegrationSuite) TestConcurrentAuthorizationsNeverOverlap() {
+	const callers = 8
+	b := s.seed()
+
+	type result struct {
+		auth repository.Authorization
+		err  error
+	}
+	out := make(chan result, callers)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			a, err := s.repo.Authorize(s.ctx, b.ID, 2, "key-"+b.ID.String(), nil)
+			out <- result{a, err}
+		}()
+	}
+	close(start)
+
+	granted, outstanding := []int{}, 0
+	for i := 0; i < callers; i++ {
+		r := <-out
+		switch {
+		case r.err == nil:
+			granted = append(granted, r.auth.Attempt)
+		case r.auth.Refusal == repository.RefusalAttemptOutstanding:
+			outstanding++
+		}
+	}
+
+	s.Len(granted, 1, "exactly one caller may hold the marker at a time")
+	s.Equal(callers-1, outstanding, "every loser must be told an attempt is outstanding, never that the budget is spent")
+	s.Equal(1, granted[0])
+}
+
+// Rule 2, and the only thing standing between an abandoned marker and a booking
+// wedged forever, since every later authorization is refused while it is set.
+func (s *IntegrationSuite) TestAnAbandonedMarkerResolvesToUnknownOnTheNextRun() {
+	b := s.seed()
+	auth, err := s.repo.Authorize(s.ctx, b.ID, 2, "key-"+b.ID.String(), nil)
+	s.Require().NoError(err)
+	s.Require().Equal(1, auth.Attempt)
+
+	attempt, resolved, err := s.repo.ResolveStaleMarker(s.ctx, b.ID, nil)
+
+	s.Require().NoError(err)
+	s.True(resolved, "a marker with no recorded outcome is the definition of unknown")
+	s.Equal(1, attempt)
+	after, err := s.repo.GetByID(s.ctx, b.ID)
+	s.Require().NoError(err)
+	s.Equal(model.StatusUnknown, after.Status)
+	s.Nil(after.InFlightAttempt, "the marker must be cleared, or the next attempt is refused forever")
+
+	_, resolved, err = s.repo.ResolveStaleMarker(s.ctx, b.ID, nil)
+	s.Require().NoError(err)
+	s.False(resolved, "a second run must find nothing to resolve")
 }
 
 func (s *IntegrationSuite) seed() model.Booking {

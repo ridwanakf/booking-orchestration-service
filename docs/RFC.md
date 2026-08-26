@@ -183,7 +183,7 @@ LIMIT $4
 - A sweep starts workflows for any booking that is not settled and has gone quiet past its staleness threshold, measured from `updated_at`. Flagged rows are skipped only while UNKNOWN: that is the parked case, and it is the only one where something else is expected to pick the booking up.
 - **Staleness is a question about time, which is why it is not a counter.** A revision number can say a booking changed; it cannot say it has not changed *for thirty seconds*, and answering that would mean recording when the revision last moved, which is `updated_at` again. Two properties make it trustworthy: `now()` is the **database's** clock and every replica queries the same database, so there is no skew to reconcile and the sweep is safe to run on every instance; and a trigger fills `updated_at` on any update that does not set it itself, so no future write path can strand a booking by forgetting it.
 - **Marker staleness threshold, a third and much shorter one.** A row in PENDING whose `in_flight_attempt` is set and whose `updated_at` is older than the supplier deadline plus its activity backstop cannot have a live call behind it: the call would have returned or timed out by now. The sweep restarts those first, and the restarted run's entry dispatch resolves the marker to UNKNOWN. Age alone would have to wait out the much longer in-flight threshold. It is exempt from the "beyond the recovery window" rule that governs the age-only threshold, and deliberately so: that rule exists to stop a booking being swept while an attempt is legitimately running, and this threshold applies only where the marker proves one cannot be.
-- The thresholds are derived, not picked. **30s for RECEIVED** is the budget for a workflow to start: long enough that a healthy start is never swept, short enough that a lost start is repaired before a distributor notices. **15 minutes for in-flight** sits deliberately beyond the whole recovery window, so a booking that is still legitimately retrying is never restarted underneath itself. RECEIVED rows are the common case, closing the gap between the row commit and the workflow start. PENDING and UNKNOWN rows are the important one: an execution terminated by a deploy, an operator, or a determinism failure is closed, so it raises no orchestrator alert and would otherwise sit untouched forever. One query, one wider status set, no per-row bookkeeping.
+- The thresholds are derived, not picked. **30s for RECEIVED** is the budget for a workflow to start: long enough that a healthy start is never swept, short enough that a lost start is repaired before a distributor notices. **15 minutes for the age-only branch** is a backstop for a booking that has gone quiet with no marker at all. A booking still legitimately retrying is protected by the marker branch instead, whose threshold is derived from the whole legitimate hold. RECEIVED rows are the common case, closing the gap between the row commit and the workflow start. PENDING and UNKNOWN rows are the important one: an execution terminated by a deploy, an operator, or a determinism failure is closed, so it raises no orchestrator alert and would otherwise sit untouched forever. One query, one wider status set, no per-row bookkeeping.
 - Start by workflow ID is idempotent, so a live execution is a no-op and a start against an already settled row exits at the entry dispatch. Recovering executions that died after starting is the orchestrator's own problem, visible in its schedule-to-start latency, and is left there deliberately (8.13).
 - Accepted consequence: a booking whose execution fails on every start is restarted indefinitely. Each attempt is cheap and reaches no supplier, and it surfaces as repeated workflow-task failures and rising schedule-to-start latency rather than as a stuck booking. It sits in RECEIVED and is never flagged, so the outcome recovery pass will not see it either: this is an orchestration fault, and it is meant to be found in orchestration telemetry rather than in the booking table. Bounding it durably needs per-row state, which is exactly the mechanism that has proven easier to get wrong than to live without, so it stays on the roadmap (8.13).
 
@@ -629,29 +629,30 @@ WITH locked AS (
     SET supplier_attempts = l.supplier_attempts + 1,
         in_flight_attempt = l.supplier_attempts + 1,
         status            = CASE WHEN l.status = 'RECEIVED' THEN 'PENDING' ELSE l.status END,
-        version           = b.version + 1,
-        updated_at        = now()
+        supplier_idempotency_key = COALESCE(b.supplier_idempotency_key, $3),
+        version                  = b.version + 1,
+        updated_at               = now()
     FROM locked l
     WHERE b.id = l.id
       AND l.in_flight_attempt IS NULL
       AND l.supplier_attempts < $2
       AND l.status IN ('RECEIVED', 'PENDING', 'UNKNOWN')
-    RETURNING b.id, l.status AS was, b.status AS now_status, b.supplier_attempts AS attempt
+    RETURNING b.id, l.status AS was, b.status AS now_status, b.supplier_attempts
 ), logged AS (
     INSERT INTO booking_events (booking_id, from_status, to_status, event_type, attempt, request_id)
-    SELECT a.id, a.was, a.now_status, 'supplier.request', a.attempt, $3
-    FROM authorized a
+    SELECT id, was, now_status, 'supplier.request', supplier_attempts, $4
+    FROM authorized
     RETURNING booking_id
 )
-SELECT (SELECT attempt FROM authorized),
-       (SELECT now_status FROM authorized),
+SELECT (SELECT supplier_attempts FROM authorized),
        (SELECT status FROM locked),
+       (SELECT in_flight_attempt FROM locked),
        (SELECT supplier_attempts FROM locked);
 ```
 
   It appends its own `booking_events` row in the same statement, like every other write that moves a booking, with `event_type = supplier.request`. The counter is exact and no attempt can run uncounted. `in_flight_attempt IS NULL` in the guard is what stops two attempts running at once. Status moves only on the first attempt, out of RECEIVED, so a healthy booking is never written as in doubt.
 - Marking the doubt before the send, rather than inferring it afterwards, is what makes the design robust to every crash. A worker killed mid-call, an activity retried inside a live run, a whole execution lost: all of them leave a row whose marker is set with no outcome recorded, so nothing has to reconstruct what happened. Whoever arrives next, the next authorization or a restarted run, resolves that to UNKNOWN. A provably-not-sent result clears the marker and leaves the row in PENDING, which is the only way a booking reaches `supplier_unreachable` honestly, which is the one case where we can honestly say nothing reached the supplier.
-- A zero-row increment is not an error; it is the answer. The returned status says which: the budget is spent, so park, or the booking has settled underneath us, so exit without contacting the supplier.
+- A zero-row increment is not an error; it is the answer, and the statement returns what is needed to tell **three** cases apart, not two. The booking has settled underneath us, so exit without contacting the supplier. The budget is spent, so park. Or a marker is already set, which means another worker is mid-call: **exit and let it finish**. Collapsing that third case into "budget spent" is the mistake that matters, because parking settles a booking FAILED while a request may be live at the supplier. That is why the locked marker and the locked attempt count both come back alongside the status.
 - `supplier_unreachable` therefore means something exact: every attempt was authorized and then proved never to have left, so the row stayed in PENDING each time and the marker was cleared each time and the budget ran out there. Any crash, any ambiguity, and the row is still UNKNOWN when the budget ends, so it parks instead.
 - The workflow-ID policy is explicit and deliberate: while a run is live, a second start returns already-started and is a no-op; after a run closes, a new run may start. The sweep is safe precisely because start-by-id plus the entry dispatch is idempotent under this policy.
 - A parked workflow never waits forever: it completes after a bounded timer.
@@ -675,29 +676,35 @@ Every write is guarded on its **business precondition**, and every write **recor
 
 ```sql
 WITH locked AS (
-    SELECT id, status, version, in_flight_attempt FROM bookings WHERE id = $1 FOR UPDATE
+    SELECT id, status, in_flight_attempt FROM bookings WHERE id = $1 FOR UPDATE
 ), moved AS (
     UPDATE bookings b
-    SET status = $2, version = b.version + 1, updated_at = now()
+    SET status             = $2,
+        version            = b.version + 1,
+        in_flight_attempt  = NULL,
+        supplier_reference = COALESCE($4, b.supplier_reference),
+        failure_reason     = $5,
+        needs_recovery     = CASE WHEN $6 THEN FALSE ELSE b.needs_recovery END
     FROM locked l
-    WHERE b.id = l.id
-      AND l.status = $3
-      AND l.in_flight_attempt IS NOT DISTINCT FROM $6   -- the marker this write owns, or NULL
-    RETURNING b.id, l.status AS was, b.status AS now_status, b.version
+    WHERE b.id = l.id AND l.status = $3 AND <marker predicate>
+    RETURNING b.id, l.status AS was, b.status AS now_status
 ), logged AS (
-    INSERT INTO booking_events (booking_id, from_status, to_status, event_type, request_id)
-    SELECT m.id, m.was, m.now_status, $4, $5
-    FROM moved m
+    INSERT INTO booking_events (
+        booking_id, from_status, to_status, event_type,
+        attempt, request_id, supplier_status_code, supplier_reason, payload_digest)
+    SELECT m.id, m.was, m.now_status, $7, $8, $9, $10, $11, $12 FROM moved m
     RETURNING booking_id
 )
-SELECT (SELECT now_status FROM moved), (SELECT status FROM locked);
+SELECT (SELECT now_status FROM moved),
+       (SELECT status FROM locked),
+       (SELECT in_flight_attempt FROM locked)
 ```
 
-`$6` is how a caller states which marker it owns: the attempt number for a worker recording its own outcome, or `NULL` for a write that must find no marker set. A callback passes no marker predicate at all, per Rule 3.
+`<marker predicate>` is the caller's marker rule, and it is a **closed enum, not a nullable value**. `MarkerClear` becomes `l.in_flight_attempt IS NULL`, `MarkerOwned` becomes `l.in_flight_attempt = $13` and requires an attempt number, and `MarkerSupersede` becomes `TRUE` for a callback, per Rule 3. **The zero value is refused**, deliberately: a caller that forgets to say what it expects of the marker is a bug, and defaulting it to any of the three would be a silent wrong answer. An integration test pins the refusal.
 
 That statement is the **template** every guarded transition follows, not a literal shared by all of them. Outcome writes extend the `SET` list with `supplier_reference`, `failure_reason`, `needs_recovery`, and `in_flight_attempt = NULL`, and extend the lineage columns with `attempt`, `supplier_status_code`, `supplier_reason`, and `payload_digest`. The shape is fixed: lock, guard, update, append, return.
 
-The trailing `SELECT` is the point: it returns the status the update applied, or null if the guard failed, alongside the status that was actually there. One statement answers both "did it apply" and "if not, what won", so a lost race is a named outcome rather than a second read that can itself race. A null in **both** columns means the row does not exist.
+The trailing `SELECT` is the point, and it returns **three** values: the status the update applied or null if the guard failed, the status that was actually there, and the marker that was actually there. Three rather than two because a failure has two distinct causes that need opposite handling: the status did not match, or the status matched and the **marker** did not, which means another attempt superseded this one and its answer must still reach the ledger. One statement answers all of it, so a lost race is a named outcome rather than a second read that can itself race. A null in every column means the row does not exist.
 
 Row locking precedes the read of the prior status. A subquery reading the row separately answers from the statement's own snapshot, so under contention it reports a status that was already stale, and a caller branching on the prior status branches on a lie.
 
@@ -741,7 +748,7 @@ Three of them are **derived** rather than independently set, and a deployment th
 |---|---|---|
 | Activity start-to-close | **greater than** the supplier deadline | It stops being a backstop and becomes the primary timeout, killing healthy slow confirmations and manufacturing the UNKNOWN state this design exists to avoid creating |
 | Shutdown grace period | **greater than** the supplier deadline | A rolling deploy force-closes a call in flight, again manufacturing UNKNOWN, on the most routine operation there is |
-| Sweep in-flight threshold | **beyond** the whole recovery window | A booking still legitimately retrying is swept and restarted underneath itself |
+| Sweep marker threshold | **beyond** one supplier call plus the persist window, with margin for queue latency | A booking still legitimately retrying is swept and restarted underneath itself |
 
 Retry parameters, configurable defaults:
 
@@ -750,7 +757,7 @@ Retry parameters, configurable defaults:
 | Supplier request deadline | 90s for book, per supplier from the registry (8.6), with a 60s floor. Availability and price checks get much shorter deadlines; book does not |
 | Delay between create attempts | 30s. With a lifetime budget of two creates this is the only wait that occurs. The 60s / 120s / 300s schedule belongs to retrieve-driven recovery, which is roadmap (8.1), and is not configured in v0.1 |
 | Create attempts, lifetime | 2. In v0.1 the second is blind, which is safe only because the v0.1 supplier deduplicates on the reference we send. In production it is gated on the registry saying create is safe to repeat (8.6) **and** a retrieve having authoritatively not found the booking (8.1); until both exist, a supplier without create idempotency must be configured to 1 |
-| Recovery window before parking | in v0.1, one delay plus at most two attempts: roughly four minutes worst case, and sooner on a fast-fail answer. The ten-minute retrieve window belongs to 8.1 |
+| Recovery window before parking | one delay plus at most two attempts, where an attempt is the supplier call **plus** the window its outcome write may retry in: roughly 24 minutes worst case at the defaults, and seconds in practice. The retrieve window belongs to 8.1 |
 | Per-supplier rate governor | required, not optional: book endpoints are metered separately from search and look-to-book ratios are contractual, so repeated creates on one booking are a commercial problem before they are a technical one |
 | Activity start-to-close | supplier deadline plus 15s (105s at the default), a backstop for a client deadline that fails to fire. It is derived, never set independently: shorter than the deadline it guards, it pre-empts the call instead of backstopping it. When a client deadline does fail to fire, an abandoned call can still be in flight when the next attempt starts. That is safe here only because the v0.1 supplier deduplicates on the reference we send. Against a supplier without create idempotency, overlapping creates are forbidden: outcome recovery must resolve the earlier attempt before another create is issued (2.1, 8.1) |
 | Retry jitter | none in v0.1, deterministic on purpose so tests are exact; jitter is a fleet-scale addition |
@@ -817,8 +824,8 @@ Structured JSON logs with a fixed event vocabulary; every line carries `request_
 | Guarded-update polarity | unit against the database: zero rows with status already at target continues; zero rows with a conflict stops without a supplier call |
 | Unclassifiable supplier answer | workflow test: an answer with no recognized decline code, whether a 4xx or a 200 error envelope, goes to UNKNOWN and retries rather than failing |
 | Deploy safety | replay test against histories exported from real executions and committed as fixtures, including a **parked** one mid-execution on a long timer, which is the booking most likely to be alive across a deploy. It pins the workflow type and task queue names, and it is the test that proves workflow parameters are carried in history rather than read from configuration |
-| Attempt exclusion | integration: concurrent authorizations against one booking grant distinct attempt numbers, stop at the budget, and never overlap, because `in_flight_attempt IS NULL` is part of the guard |
-| Marker discipline | integration: a crash with the marker set resolves to UNKNOWN on the next run; an attempt cannot clear a marker its successor set |
+| Attempt exclusion | integration: eight concurrent authorizations against one booking grant exactly one attempt, and every loser is told an attempt is outstanding rather than that the budget is spent, because `in_flight_attempt IS NULL` is part of the guard under `FOR UPDATE` |
+| Marker discipline | integration: integration: a marker left set resolves to UNKNOWN on the next run and is cleared, and a second run finds nothing left to resolve; an attempt cannot clear a marker its successor set |
 | Lineage completeness | integration: every transition appends exactly one event in the same transaction, and a refused callback still records why |
 | Tenant isolation | service test: a booking created by one distributor answers `404` to another, and the credential overwrites any body value before the fingerprint is computed |
 | Constraint enforcement | integration: the database refuses a status outside the state machine, a stay that ends before it starts, and a marker naming an attempt outside the budget |

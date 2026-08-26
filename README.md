@@ -59,7 +59,7 @@ The supplier is mocked in-process and picks its behaviour from a suffix on `room
 |---|---|
 | `-confirm` | confirms immediately |
 | `-reject` | declines with a recognized decline code |
-| `-timeout` | holds past the deadline, then delivers its callback **twice** |
+| `-timeout` | holds past the deadline; separately, and on its own timer, delivers its callback **twice** |
 | `-unclassified` | answers `200` with an error envelope and no decline code |
 | anything else | confirms |
 
@@ -88,15 +88,17 @@ Same call with `"roomTypeId": "room-deluxe-timeout"`. The supplier holds the con
 Poll `GET /bookings/{id}` while it runs and the intermediate states are visible:
 
 ```
-t= 0s  PENDING
-t= 4s  PENDING
+t= 0s  PENDING    attempt 1    the workflow authorized a call and the marker is set
+t= 4s  PENDING    attempt 1
 t= 8s  UNKNOWN                 the deadline passed with no answer
-t=12s  CONFIRMED  MOCK-...     the late callback resolved it
+t=10s  CONFIRMED  MOCK-...     the late callback resolved it
 ```
+
+Expect a second either way: the workflow start and its entry dispatch cost roughly a second before the first attempt is authorized, and every poll pays a round trip of its own. What matters is the order and the gaps, not the exact numbers.
 
 Doubt starts at the deadline, not before it. A booking is `PENDING` while its call is in flight and only becomes `UNKNOWN` when the deadline passes with nothing to show for it.
 
-The compose stack sets `SUPPLIER_DEADLINE=8s` and `MOCK_TIMEOUT_HOLD=25s` so this is observable in seconds. The production default deadline is 90s, and the hold must exceed the deadline or the call simply succeeds and nothing times out.
+The compose stack sets `SUPPLIER_DEADLINE=8s`, `MOCK_TIMEOUT_HOLD=25s`, and `MOCK_CALLBACK_DELAY=12s` so this is observable in seconds. **All three matter.** The hold is what makes the call time out; the callback delay is what fires the late confirmation, on its own timer and independent of the hold. Leave `MOCK_CALLBACK_DELAY` at its 3s default and the callback lands while the booking is still `PENDING`, so it goes straight to `CONFIRMED` and the scenario demonstrates the opposite of its point. The production default deadline is 90s, and the hold must exceed the deadline or the call simply succeeds and nothing times out.
 
 ### 4. The same booking sent to the supplier twice
 
@@ -108,7 +110,7 @@ The mock deliberately posts its callback twice. The first applies; the second re
 
 ```bash
 curl -X POST localhost:8080/supplier/callbacks \
-  -H 'Content-Type: application/json' -H "X-Callback-Token: $CALLBACK_TOKEN" \
+  -H 'Content-Type: application/json' -H 'X-Callback-Token: local-only-not-a-secret' \
   -d '{"bookingId": "<id>", "supplierReference": "<ref>", "supplierStatus": "CONFIRMED"}'
 ```
 
@@ -148,7 +150,7 @@ Seven states. `CANCELLED` is modelled and reserved for a cancellation flow this 
 | State | Meaning |
 |---|---|
 | `RECEIVED` | committed, nothing sent yet |
-| `PENDING` | a supplier call is in flight, or has been made and answered nothing yet |
+| `PENDING` | a call is in flight, or every attempt so far proved nothing left. The marker says which: set means in flight, clear means provably not sent, which is what makes settling FAILED from here honest |
 | `UNKNOWN` | a request may have reached the supplier; the outcome is unproven |
 | `CONFIRMED` | the supplier holds the booking, with its reference |
 | `REJECTED` | the supplier declined for a reason we recognize |
@@ -211,7 +213,7 @@ ORDER BY seq;
 
 ```bash
 curl -X POST localhost:8080/supplier/callbacks \
-  -H 'Content-Type: application/json' -H "X-Callback-Token: $CALLBACK_TOKEN" \
+  -H 'Content-Type: application/json' -H 'X-Callback-Token: local-only-not-a-secret' \
   -d '{"bookingId": "<id>", "supplierReference": "<their ref>", "supplierStatus": "CONFIRMED"}'
 ```
 
