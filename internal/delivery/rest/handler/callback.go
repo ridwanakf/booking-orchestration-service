@@ -79,9 +79,6 @@ func (h *Callback) Receive(c *gin.Context) {
 	switch {
 	case errors.Is(err, constant.ErrBookingNotFound):
 		respondError(c, http.StatusNotFound, CodeBookingNotFound, "booking not found")
-	case errors.Is(err, constant.ErrMissingSupplierReference):
-		respondError(c, http.StatusBadRequest, CodeMissingReference,
-			"a confirmation must carry the supplier's reservation reference")
 	case errors.Is(err, constant.ErrUnsupportedSupplierStatus):
 		respondError(c, http.StatusBadRequest, CodeUnsupportedSupplierState, "supplier status is outside this version's vocabulary")
 	case errors.Is(err, constant.ErrCallbackConflict):

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -58,6 +59,7 @@ func (h *Booking) Create(c *gin.Context) {
 		return
 	}
 
+	c.Header("ETag", strconv.Quote(strconv.Itoa(b.Version)))
 	if !created {
 		c.Header("Idempotent-Replayed", "true")
 		c.JSON(http.StatusOK, toResponse(b))
@@ -95,6 +97,7 @@ func (h *Booking) Get(c *gin.Context) {
 		return
 	}
 
+	c.Header("ETag", strconv.Quote(strconv.Itoa(b.Version)))
 	c.JSON(http.StatusOK, toResponse(b))
 }
 
@@ -109,6 +112,11 @@ func parseCreateRequest(req CreateBookingRequest) (model.CreateRequest, error) {
 	}
 	if !checkOut.After(checkIn) {
 		return model.CreateRequest{}, fmt.Errorf("checkOut must be after checkIn")
+	}
+	// A stale or defaulted date range from a distributor would otherwise be sent
+	// to the supplier as a real create and counted against a metered endpoint.
+	if checkIn.Before(time.Now().UTC().Truncate(24 * time.Hour)) {
+		return model.CreateRequest{}, fmt.Errorf("checkIn must not be in the past")
 	}
 
 	return model.CreateRequest{

@@ -30,7 +30,14 @@ func Authenticate(keys repository.APIKeyRepository) gin.HandlerFunc {
 		}
 
 		stored, err := keys.FindActive(c.Request.Context(), key.ID)
-		if err != nil || !auth.Verify(key.Secret, stored.SecretHash) {
+		if err != nil {
+			// Deliberately does the work anyway, so a miss and a wrong secret
+			// cost the same and the id space cannot be enumerated by timing.
+			auth.VerifyMiss(key.Secret)
+			unauthorized(c)
+			return
+		}
+		if !auth.Verify(key.Secret, stored.SecretHash) {
 			unauthorized(c)
 			return
 		}

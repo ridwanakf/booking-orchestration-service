@@ -67,9 +67,11 @@ func Load() (AppConfig, error) {
 		// already gave, so it is generous by design.
 		loaded.PersistWindow = l.dur(keyPersistWindow, 10*time.Minute)
 
-		// A marker older than one deadline plus its backstop cannot have a live
-		// call behind it, so it is derived rather than set independently.
-		loaded.SweepMarkerThreshold = l.dur(keySweepMarkerThreshold, loaded.ActivityStartToClose+15*time.Second)
+		// The marker is held from authorization until the outcome persists, so a
+		// legitimate hold spans one supplier call plus the whole persist window.
+		// Deriving it from the call alone declares healthy bookings wedged.
+		loaded.SweepMarkerThreshold = l.dur(keySweepMarkerThreshold,
+			loaded.ActivityStartToClose+loaded.PersistWindow+10*loaded.SweepInterval)
 
 		l.validate(loaded)
 		loadErr = errors.Join(l.errs...)
@@ -167,9 +169,16 @@ func (l *loader) validate(c AppConfig) {
 			"SHUTDOWN_TIMEOUT (%s) must exceed SUPPLIER_DEADLINE (%s), or a deploy force-closes a call in flight",
 			c.ShutdownTimeout, c.SupplierDeadline))
 	}
-	if c.SweepMarkerThreshold <= c.ActivityStartToClose {
+	if c.PersistWindow <= c.ActivityStartToClose {
 		l.errs = append(l.errs, fmt.Errorf(
-			"SWEEP_MARKER_THRESHOLD (%s) must exceed the activity backstop (%s), or the sweep restarts bookings whose call is still live",
-			c.SweepMarkerThreshold, c.ActivityStartToClose))
+			"PERSIST_WINDOW (%s) must exceed the activity backstop (%s); the server clamps start-to-close down to it silently, so a smaller window makes the persist less durable, not more",
+			c.PersistWindow, c.ActivityStartToClose))
+	}
+	// The margin covers schedule-to-start latency, which is unbounded in
+	// principle: the sweep must not clear a marker a live persist still owns.
+	if hold := c.ActivityStartToClose + c.PersistWindow + 5*c.SweepInterval; c.SweepMarkerThreshold <= hold {
+		l.errs = append(l.errs, fmt.Errorf(
+			"SWEEP_MARKER_THRESHOLD (%s) must exceed one supplier call plus the persist window (%s), or the sweep reports healthy bookings as wedged",
+			c.SweepMarkerThreshold, hold))
 	}
 }

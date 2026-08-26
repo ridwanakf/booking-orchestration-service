@@ -28,6 +28,11 @@ const (
 
 var ErrMalformedKey = errors.New("malformed api key")
 
+// A miss must cost what a hit costs. Without this, an unknown key id returns
+// before Argon2id runs and a known one does not, which enumerates every valid
+// key id in one timing pass.
+var decoy = mustDecoy()
+
 type Key struct {
 	ID     string
 	Secret string
@@ -81,4 +86,17 @@ func Verify(secret, encoded string) bool {
 
 	got := argon2.IDKey([]byte(secret), salt, time, memory, threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// VerifyMiss burns the same work a real verification would, and always fails.
+func VerifyMiss(secret string) bool {
+	return Verify(secret, decoy)
+}
+
+func mustDecoy() string {
+	h, err := Hash("a secret no key is ever issued with")
+	if err != nil {
+		panic("auth: cannot build the decoy hash: " + err.Error())
+	}
+	return h
 }

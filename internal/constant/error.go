@@ -13,7 +13,6 @@ var (
 	ErrUnsupportedSupplierStatus = errors.New("unsupported supplier status")
 	ErrInvalidCallbackToken      = errors.New("invalid callback token")
 	ErrUnauthorized              = errors.New("unauthorized")
-	ErrMissingSupplierReference  = errors.New("confirmation carried no supplier reference")
 	ErrInvalidConfig             = errors.New("invalid configuration")
 	ErrAttemptSuperseded         = errors.New("attempt superseded while its call was outstanding")
 	ErrCallbackConflict          = errors.New("callback conflicts with the booking state")

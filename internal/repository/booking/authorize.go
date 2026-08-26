@@ -130,9 +130,10 @@ func (r *Repo) ParkIfUnknown(ctx context.Context, id uuid.UUID, requestID *strin
 // Flag marks a booking for outcome recovery without moving it. Deliberately
 // unguarded on status: a booking already flagged staying flagged is correct.
 func (r *Repo) Flag(ctx context.Context, id uuid.UUID) error {
-	// This does not opt out of the touch trigger: its IS NOT DISTINCT FROM test
-	// is true for a self-assignment, so updated_at still moves. Flagged rows are
-	// excluded from the sweep by their own predicate, which is what protects it.
+	// The self-assignment does not opt out of the touch trigger, because its
+	// IS NOT DISTINCT FROM test is true for it. What bounds the damage is the
+	// NOT needs_recovery guard below: a re-flag matches no row, so a supplier
+	// redelivering a refused callback cannot push the clock forward repeatedly.
 	tag, err := r.db.Exec(ctx,
 		`UPDATE bookings SET needs_recovery = TRUE, version = version + 1, updated_at = updated_at
 		 WHERE id = $1 AND NOT needs_recovery`, id)

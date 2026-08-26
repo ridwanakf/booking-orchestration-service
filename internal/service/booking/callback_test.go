@@ -55,7 +55,10 @@ func (s *ServiceSuite) TestARedeliveredCallbackIsANoOp() {
 // confirmation inapplicable. Refusing it would discard supplier truth and leave
 // an attempt in flight for a room already confirmed.
 func (s *ServiceSuite) TestACallbackRetriesOnceAgainstTheStatusThatWon() {
-	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusPending, nil), nil)
+	// Twice: once before the write, and once after losing the race, because the
+	// first read predates the winner and cannot be compared against.
+	s.repo.EXPECT().GetByID(gomock.Any(), s.id).
+		Return(s.stored(model.StatusPending, nil), nil).Times(2)
 	gomock.InOrder(
 		s.repo.EXPECT().Apply(gomock.Any(), s.id, gomock.Any()).
 			Return(model.StatusUnknown, constant.ErrTransitionConflict),
@@ -147,16 +150,21 @@ func (s *ServiceSuite) TestASignalFailureDoesNotFailTheCallback() {
 	s.True(got.Applied)
 }
 
-// A confirmation with no reservation number is not usable truth: the reference
-// is the handle recovery needs, and settling without it leaves a booking that
-// no query can surface and no compensation can address.
-func (s *ServiceSuite) TestAConfirmationWithoutAReferenceIsRefused() {
+// A confirmation with no reservation number is still the supplier's own word
+// that a reservation exists. Refusing it would discard that, and a 4xx tells a
+// well-behaved supplier to stop redelivering. It is applied and flagged, so an
+// operator supplies the reference the supplier did not.
+func (s *ServiceSuite) TestAConfirmationWithoutAReferenceIsAppliedAndFlagged() {
 	s.repo.EXPECT().GetByID(gomock.Any(), s.id).Return(s.stored(model.StatusPending, nil), nil)
-	s.repo.EXPECT().AppendRefusal(gomock.Any(), s.id, gomock.Any()).Return(nil)
+	s.repo.EXPECT().Apply(gomock.Any(), s.id, gomock.Any()).Return(model.StatusConfirmed, nil)
+	s.repo.EXPECT().Flag(gomock.Any(), s.id).Return(nil)
+	s.orch.EXPECT().SignalOutcome(gomock.Any(), s.id, "CONFIRMED").Return(nil)
 
-	_, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Status: "CONFIRMED"})
+	got, err := s.svc.ApplyCallback(s.ctx, s.id, service.SupplierOutcome{Status: "CONFIRMED"})
 
-	s.ErrorIs(err, constant.ErrMissingSupplierReference)
+	s.Require().NoError(err)
+	s.True(got.Applied, "supplier truth must not be discarded for want of a reference")
+	s.Equal(model.StatusConfirmed, got.Status)
 }
 
 // A stored reference of nil does not match everything: a callback naming a

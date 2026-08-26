@@ -12,7 +12,7 @@ import (
 
 type Config struct {
 	CreateAttempts       int
-	RetrieveDelays       []time.Duration
+	RetryDelays          []time.Duration
 	ParkTimeout          time.Duration
 	ActivityStartToClose time.Duration
 	PersistWindow        time.Duration
@@ -49,7 +49,8 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 	cfg := fromParams(params)
 	log := workflow.GetLogger(ctx)
 
-	// A read that keeps failing loses nothing by giving up: the sweep restarts it.
+	// Reads only. A read that keeps failing loses nothing by giving up, because
+	// the sweep restarts the booking; a write does, so writes do not use this.
 	idempotent := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: cfg.ActivityStartToClose,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -58,16 +59,7 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 			MaximumAttempts: 5,
 		},
 	})
-	// A persist holds an answer the supplier already gave, so giving up loses a
-	// confirmation that exists. Bounded by a window, which a count would defeat.
-	persisting := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout:    cfg.ActivityStartToClose,
-		ScheduleToCloseTimeout: cfg.PersistWindow,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval: time.Second,
-			MaximumInterval: 30 * time.Second,
-		},
-	})
+	persisting := workflow.WithActivityOptions(ctx, writeOptions(cfg))
 	// A retried call is a second create that no attempt counter ever saw.
 	sending := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: cfg.ActivityStartToClose,
@@ -125,7 +117,8 @@ func BookingWorkflow(ctx workflow.Context, bookingID string, params constant.Wor
 // bounded window so a late callback resolves it without human involvement.
 func park(ctx workflow.Context, cfg Config, bookingID string) error {
 	var parked bool
-	if err := workflow.ExecuteActivity(ctx, ActivityPark, bookingID).Get(ctx, &parked); err != nil {
+	writing := workflow.WithActivityOptions(ctx, writeOptions(cfg))
+	if err := workflow.ExecuteActivity(writing, ActivityPark, bookingID).Get(ctx, &parked); err != nil {
 		return err
 	}
 	// False means not in doubt: settled, or called unreachable.
@@ -153,19 +146,19 @@ func park(ctx workflow.Context, cfg Config, bookingID string) error {
 // Deterministic on purpose: the tests assert exact schedules, and jitter buys
 // nothing at one workflow per booking.
 func delay(cfg Config, attempt int) time.Duration {
-	if len(cfg.RetrieveDelays) == 0 {
+	if len(cfg.RetryDelays) == 0 {
 		return 30 * time.Second
 	}
-	if attempt-1 < len(cfg.RetrieveDelays) {
-		return cfg.RetrieveDelays[attempt-1]
+	if attempt-1 < len(cfg.RetryDelays) {
+		return cfg.RetryDelays[attempt-1]
 	}
-	return cfg.RetrieveDelays[len(cfg.RetrieveDelays)-1]
+	return cfg.RetryDelays[len(cfg.RetryDelays)-1]
 }
 
 func fromParams(p constant.WorkflowParams) Config {
 	return Config{
 		CreateAttempts:       p.CreateAttempts,
-		RetrieveDelays:       p.RetryDelays,
+		RetryDelays:          p.RetryDelays,
 		ParkTimeout:          p.ParkTimeout,
 		ActivityStartToClose: p.ActivityTimeout,
 		PersistWindow:        p.PersistWindow,
@@ -176,4 +169,18 @@ func fromParams(p constant.WorkflowParams) Config {
 // settled set is a second thing to forget when a status is added.
 func settled(status string) bool {
 	return model.Status(status).Settled()
+}
+
+// A write holds an answer the supplier already gave, or arms the window that
+// recovers one, so giving up loses something real. Bounded by a window rather
+// than a count, which a count would defeat.
+func writeOptions(cfg Config) workflow.ActivityOptions {
+	return workflow.ActivityOptions{
+		StartToCloseTimeout:    cfg.ActivityStartToClose,
+		ScheduleToCloseTimeout: cfg.PersistWindow,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval: time.Second,
+			MaximumInterval: 30 * time.Second,
+		},
+	}
 }
