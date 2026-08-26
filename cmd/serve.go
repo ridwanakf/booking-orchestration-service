@@ -34,9 +34,6 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 	gin.SetMode(gin.ReleaseMode)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	// Every exit path must cancel the context, or the background goroutines are
-	// still running when the deferred Close pulls the pool out from under them.
-	defer stop()
 
 	if err := migrate.Up(ctx, cfg.PostgresDSN); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
@@ -47,6 +44,9 @@ func Serve(ctx context.Context, _ *cli.Command) error {
 		return fmt.Errorf("build app: %w", err)
 	}
 	defer application.Close()
+	// Registered after Close so it runs before it: defers are LIFO, and cancelling
+	// has to reach the background goroutines while the pool is still open.
+	defer stop()
 
 	engine := rest.NewEngine(handler.NewHealth(application.Ready), handler.NewBooking(application.Booking),
 		handler.NewCallback(application.Booking, cfg.CallbackToken), application.APIKeys, cfg.SwaggerEnabled)

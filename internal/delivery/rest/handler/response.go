@@ -11,7 +11,6 @@ const (
 	CodeUnsupportedSupplierState = "unsupported_supplier_status"
 	CodeInternalError            = "internal_error"
 	CodeDependencyUnavailable    = "dependency_unavailable"
-	CodeMissingReference         = "missing_supplier_reference"
 )
 
 // Code is stable and machine readable; Message is not.

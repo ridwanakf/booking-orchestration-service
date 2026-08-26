@@ -528,7 +528,6 @@ Every error shares one envelope, and `code` is the stable, machine-readable fiel
 | 409 | `callback_conflict` | *(callbacks only)* The asserted outcome contradicts a settled booking, or carries a second supplier reference | Do not retry. The discrepancy is flagged for outcome recovery and needs a human |
 | 422 | `idempotency_key_reused` | The key was used before with a **different** payload | Do not retry. Either reuse the original payload or choose a new key. Two different bookings under one key is a client bug, and answering with the first would hide it |
 | 400 | `invalid_request` | *(callbacks too)* An unparseable callback body, checked before anything else | Supplier-side bug; the payload never reached state routing |
-| 400 | `missing_supplier_reference` | A CONFIRMED callback carried no supplier reference. A confirmation we cannot correlate is not usable, and accepting it would record a settled booking with nothing to reconcile against | Resend with the reservation reference |
 | 400 | `unsupported_supplier_status` | *(callbacks only)* A status outside this version's vocabulary | The booking is flagged so the truth is durable. Needs a design change to apply |
 | 429 | `rate_limited` | **Not in v0.1.** Per-distributor quota, once the identity from 6.4 has a policy model behind it | Back off and retry with jitter. `Retry-After` gives the floor |
 | 500 | `internal_error` | A fault on our side | Retry with backoff **using the same idempotency key**. That is exactly what the key is for |

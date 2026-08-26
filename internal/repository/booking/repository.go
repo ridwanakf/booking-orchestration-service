@@ -122,7 +122,7 @@ func (r *Repo) FindStale(ctx context.Context, t repository.StaleThresholds, limi
 	rows, err := r.db.Query(ctx, `
 		SELECT id FROM bookings
 		WHERE status IN ('RECEIVED', 'PENDING', 'UNKNOWN')
-		  AND NOT (needs_recovery AND status = 'UNKNOWN')
+		  AND NOT (needs_recovery AND status = 'UNKNOWN' AND in_flight_attempt IS NULL)
 		  AND (
 		        (in_flight_attempt IS NOT NULL AND updated_at < now() - ($1::bigint * interval '1 millisecond'))
 		     OR (status = 'RECEIVED'           AND updated_at < now() - ($2::bigint * interval '1 millisecond'))

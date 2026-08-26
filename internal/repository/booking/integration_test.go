@@ -269,6 +269,48 @@ func (s *IntegrationSuite) TestTheDatabaseRefusesAMarkerOutsideTheBudget() {
 	s.Error(err, "a marker beyond the attempt count must not be storable")
 }
 
+// The recovery flag removes a row from the sweep only when nothing is
+// outstanding, which is the parked case it exists for. A flag landing while an
+// attempt is still in flight, which any refused callback can do, must not
+// remove the row: nothing else would ever resolve that marker.
+func (s *IntegrationSuite) TestAFlaggedRowWithAnOutstandingAttemptIsStillSwept() {
+	b := s.seed()
+	s.mustApply(b.ID, model.StatusReceived, model.StatusPending)
+	s.mustApply(b.ID, model.StatusPending, model.StatusUnknown)
+	// A second attempt authorized from UNKNOWN: the status stays in doubt and the
+	// marker is set, which is the state a refused callback can then flag.
+	_, err := s.repo.Authorize(s.ctx, b.ID, 2, "key-"+b.ID.String(), nil)
+	s.Require().NoError(err)
+	s.Require().NoError(s.repo.Flag(s.ctx, b.ID))
+	s.age(b.ID, 2*time.Hour)
+
+	stale, err := s.repo.FindStale(s.ctx, repository.StaleThresholds{
+		Marker: time.Minute, Received: time.Minute, Idle: time.Minute,
+	}, 100)
+
+	s.Require().NoError(err)
+	s.Contains(stale, b.ID, "a flagged row still holding a marker has no other way out")
+}
+
+// The parked case: flagged, in doubt, and nothing outstanding. That row belongs
+// to outcome recovery, so the sweep must leave it alone.
+func (s *IntegrationSuite) TestAParkedRowIsNotSwept() {
+	b := s.seed()
+	s.mustApply(b.ID, model.StatusReceived, model.StatusPending)
+	s.mustApply(b.ID, model.StatusPending, model.StatusUnknown)
+	parked, err := s.repo.ParkIfUnknown(s.ctx, b.ID, nil)
+	s.Require().NoError(err)
+	s.Require().True(parked)
+	s.age(b.ID, 2*time.Hour)
+
+	stale, err := s.repo.FindStale(s.ctx, repository.StaleThresholds{
+		Marker: time.Minute, Received: time.Minute, Idle: time.Minute,
+	}, 100)
+
+	s.Require().NoError(err)
+	s.NotContains(stale, b.ID, "a parked booking waits for recovery, not for the sweep")
+}
+
 func (s *IntegrationSuite) seed() model.Booking {
 	b := s.newBooking()
 	stored, created, err := s.repo.InsertOrLoad(s.ctx, b, nil)
@@ -300,6 +342,15 @@ func (s *IntegrationSuite) mustApply(id uuid.UUID, from, to model.Status) {
 	_, err := s.repo.Apply(s.ctx, id, repository.Transition{
 		From: from, To: to, Marker: repository.MarkerClear, EventType: model.EventTransition,
 	})
+	s.Require().NoError(err)
+}
+
+// The touch trigger only fills updated_at when a statement leaves it alone, so
+// ageing a row deliberately is possible and is what these tests need.
+func (s *IntegrationSuite) age(id uuid.UUID, by time.Duration) {
+	_, err := s.pool.Exec(s.ctx,
+		`UPDATE bookings SET updated_at = now() - $2::interval WHERE id = $1`,
+		id, by.String())
 	s.Require().NoError(err)
 }
 

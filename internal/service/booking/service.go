@@ -116,11 +116,13 @@ func (s *Service) ApplyCallback(ctx context.Context, id uuid.UUID, outcome servi
 		return service.CallbackResult{}, err
 	}
 
-	if target, ok := applicableStatus[outcome.Status]; ok && target == model.StatusConfirmed && outcome.Reference == "" {
-		s.log.ErrorContext(ctx, "confirmation carried no supplier reference",
-			"event", model.EventCallbackRejected, "booking_id", id)
-		s.recordRefusal(ctx, id, current.Status, model.EventCallbackRejected, outcome, "confirmation without a reference")
-		return service.CallbackResult{}, constant.ErrMissingSupplierReference
+	// Refusing this would discard the supplier's own word that a reservation
+	// exists, and a 4xx tells it to stop redelivering. Applied, then flagged.
+	unreferencedConfirmation := false
+	if t, ok := applicableStatus[outcome.Status]; ok && t == model.StatusConfirmed && outcome.Reference == "" {
+		s.log.WarnContext(ctx, "confirmation carried no supplier reference, applying and flagging",
+			"event", model.EventSupplierCallback, "booking_id", id)
+		unreferencedConfirmation = true
 	}
 
 	target, ok := applicableStatus[outcome.Status]
@@ -140,13 +142,7 @@ func (s *Service) ApplyCallback(ctx context.Context, id uuid.UUID, outcome servi
 	if current.Status == model.StatusReceived {
 		s.log.WarnContext(ctx, "callback for a booking that was never sent",
 			"event", model.EventConflict, "booking_id", id, "supplier_status", outcome.Status)
-		reason := "callback while still RECEIVED"
-		if err := s.repo.AppendRefusal(ctx, id, model.Event{
-			ToStatus: current.Status, EventType: model.EventConflict,
-			RequestID: requestID, SupplierStatusCode: &outcome.Status, SupplierReason: &reason,
-		}); err != nil {
-			s.log.ErrorContext(ctx, "could not record the refusal", "booking_id", id, "error", err)
-		}
+		s.recordRefusal(ctx, id, current.Status, model.EventConflict, outcome, "callback while still RECEIVED")
 		return service.CallbackResult{}, constant.ErrCallbackConflict
 	}
 
@@ -165,9 +161,10 @@ func (s *Service) ApplyCallback(ctx context.Context, id uuid.UUID, outcome servi
 	// a retry moving the row in the gap does not make a confirmation inapplicable.
 	applied, err := s.repo.Apply(ctx, id, s.callbackTransition(current.Status, target, reference, reason, outcome, requestID))
 	if errors.Is(err, constant.ErrTransitionConflict) {
-		// The same comparison the settled branch makes, so whether a divergent
-		// reservation number is audited does not depend on who won a race.
-		if applied == target && sameReference(current.SupplierReference, outcome.Reference) {
+		// `current` predates the write that just won, so comparing against it
+		// reports two identical callbacks racing as a divergent reference.
+		winner, readErr := s.repo.GetByID(ctx, id)
+		if readErr == nil && applied == target && sameReference(winner.SupplierReference, outcome.Reference) {
 			return service.CallbackResult{Status: applied, Duplicate: true}, nil
 		}
 		if applied.Settled() || model.Transition(applied, target) != nil {
@@ -190,6 +187,14 @@ func (s *Service) ApplyCallback(ctx context.Context, id uuid.UUID, outcome servi
 	s.log.InfoContext(ctx, "callback applied",
 		"event", model.EventSupplierCallback, "booking_id", id, "applied", true, "duplicate", false,
 		"from", current.Status, "to", target)
+
+	// The transition cleared the recovery flag, so this has to run after it.
+	if unreferencedConfirmation {
+		if err := s.repo.Flag(ctx, id); err != nil {
+			s.log.ErrorContext(ctx, "could not flag the unreferenced confirmation",
+				"booking_id", id, "error", err)
+		}
+	}
 
 	if err := s.orch.SignalOutcome(ctx, id, string(target)); err != nil {
 		s.log.WarnContext(ctx, "could not signal the workflow",
